@@ -5,15 +5,15 @@ import sqlite3
 st.set_page_config(layout="wide", page_title="Закупки НМИЦ")
 
 
-# --- 1. БАЗА ДАННЫХ (НОВАЯ ВЕРСИЯ v3) ---
+# --- БАЗА ДАННЫХ (Версия 4 - с расширенными контрактами) ---
 def get_connection():
-    return sqlite3.connect('procurement_v3.db')
+    return sqlite3.connect('procurement_v4.db')
 
 
 def init_db():
     conn = get_connection()
     c = conn.cursor()
-    # Создаем таблицу по твоему ТЗ из аудио
+    # Основная таблица
     c.execute('''CREATE TABLE IF NOT EXISTS purchases
                  (
                      id
@@ -25,6 +25,8 @@ def init_db():
                      TEXT,
                      name
                      TEXT,
+                     year
+                     INTEGER,
                      plan_2026
                      REAL,
                      plan_2027
@@ -44,7 +46,7 @@ def init_db():
                      plan_graph_num
                      TEXT
                  )''')
-    # Таблица для контрактов (оставляем для расчета "Сыграно")
+    # Таблица контрактов (расширенная)
     c.execute('''CREATE TABLE IF NOT EXISTS contracts
                  (
                      id
@@ -54,9 +56,17 @@ def init_db():
                      AUTOINCREMENT,
                      purchase_id
                      INTEGER,
-                     contract_info
+                     contract_num
+                     TEXT,
+                     contract_date
+                     TEXT,
+                     one_s_num
+                     TEXT,
+                     ifo
                      TEXT,
                      contract_sum
+                     REAL,
+                     extra_sum
                      REAL
                  )''')
     conn.commit()
@@ -65,92 +75,108 @@ def init_db():
 
 init_db()
 
-# --- 2. БОКОВАЯ ПАНЕЛЬ (ВВОД) ---
-with st.sidebar:
-    st.header("➕ Новая позиция")
-    with st.form("input_form", clear_on_submit=True):
-        sub = st.selectbox("Подразделение", ["Автохозяйство", "Административно-хозяйственный отдел"])
-        name = st.text_area("Наименование")
 
-        col_sum1, col_sum2, col_sum3 = st.columns(3)
-        p26 = col_sum1.number_input("Планируемая сумма, руб., 2026 ГОД", min_value=0.0)
-        p27 = col_sum2.number_input("Планируемая сумма, руб., 2027 ГОД", min_value=0.0)
-        p28 = col_sum3.number_input("Планируемая сумма, руб., 2028 ГОД", min_value=0.0)
+# --- ФУНКЦИИ ОБНОВЛЕНИЯ ---
+def update_purchase(row):
+    conn = get_connection()
+    c = conn.cursor()
+    c.execute('''UPDATE purchases
+                 SET subdivision=?,
+                     name=?,
+                     year=?,
+                     plan_2026=?,
+                     plan_2027=?,
+                     plan_2028=?,
+                     okpd2=?,
+                     kosgu=?,
+                     basis=?,
+                     ifo=?,
+                     request_num=?,
+                     plan_graph_num=?
+                 WHERE id = ?''', (*row[1:], row[0]))
+    conn.commit()
+    conn.close()
 
-        okpd = st.text_input("ОКПД2")
-        kosgu = st.text_input("КОСГУ")
-        base = st.selectbox("Основание", ["44-ФЗ", "223-ФЗ", "ВБ", "ГЗ", "ОМС"])
-        ifo = st.text_input("ИФО")
-        req_n = st.text_input("№ предложения на закупку")
-        graph_n = st.text_input("№ план-графика")
 
-        if st.form_submit_button("Добавить в реестр"):
+# --- ИНТЕРФЕЙС ---
+st.title("📋 Учет закупок и контрактов")
+
+# Поток ввода новых данных
+with st.expander("➕ Добавить новую позицию закупки"):
+    with st.form("new_proc", clear_on_submit=True):
+        col1, col2, col3 = st.columns([2, 3, 1])
+        sub = col1.selectbox("Подразделение", ["Автохозяйство", "Админ. отдел", "Лаборатория", "АХО"])
+        name = col2.text_input("Наименование объекта")
+        year = col3.number_input("Год разм.", value=2026, step=1)  # "Колесико" для года
+
+        c1, c2, c3 = st.columns(3)
+        p26 = c1.number_input("План 2026 (руб.)", format="%.2f", step=0.01)
+        p27 = c2.number_input("План 2027 (руб.)", format="%.2f", step=0.01)
+        p28 = c3.number_input("План 2028 (руб.)", format="%.2f", step=0.01)
+
+        if st.form_submit_button("Сохранить позицию"):
             conn = get_connection()
             conn.cursor().execute('''INSERT INTO purchases
-                                     (subdivision, name, plan_2026, plan_2027, plan_2028, okpd2, kosgu, basis, ifo,
-                                      request_num, plan_graph_num)
-                                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
-                                  (sub, name, p26, p27, p28, okpd, kosgu, base, ifo, req_n, graph_n))
+                                         (subdivision, name, year, plan_2026, plan_2027, plan_2028)
+                                     VALUES (?, ?, ?, ?, ?, ?)''', (sub, name, year, p26, p27, p28))
             conn.commit()
             conn.close()
             st.rerun()
 
-# --- 3. ОСНОВНАЯ ТАБЛИЦА ---
-st.title("📋 План закупок НМИЦ Гематологии")
-
+# --- ОСНОВНАЯ ЧАСТЬ (Таблица + Детали) ---
 conn = get_connection()
-# Запрос, который считает "Сыграно" и "Остаток" только для 2026 года (как в твоей таблице)
-query = '''
-        SELECT p.subdivision, \
-               p.name, \
-               p.plan_2026, \
-               p.plan_2027, \
-               p.plan_2028,
-               p.okpd2, \
-               p.kosgu, \
-               p.basis, \
-               p.ifo, \
-               p.request_num, \
-               p.plan_graph_num,
-               IFNULL(SUM(c.contract_sum), 0)                 as played_sum,
-               (p.plan_2026 - IFNULL(SUM(c.contract_sum), 0)) as remainder,
-               p.id
-        FROM purchases p
-                 LEFT JOIN contracts c ON p.id = c.purchase_id
-        GROUP BY p.id \
-        '''
-df = pd.read_sql_query(query, conn)
+df = pd.read_sql_query("SELECT * FROM purchases", conn)
 conn.close()
 
-if not df.empty:
-    # Прячем ID от пользователя, но оставляем его в данных для работы
-    display_df = df.drop(columns=['id'])
-    display_df.columns = [
-        "Подразделение", "Наименование", "Планируемая сумма, руб., 2026 ГОД", "Планируемая сумма, руб., 2027 ГОД", "Планируемая сумма, руб., 2028 ГОД",
-        "ОКПД2", "КОСГУ", "Основание", "ИФО", "№ предл.", "№ графика", "Сыграно", "Остаток"
-    ]
+col_main, col_details = st.columns([2, 1])  # Делим экран: таблица и мини-таблица контрактов
 
-    st.data_editor(display_df, use_container_width=True, hide_index=True)
+with col_main:
+    st.subheader("Главный реестр")
+    if not df.empty:
+        # Редактируемая таблица
+        edited_df = st.data_editor(df, use_container_width=True, hide_index=True, key="main_editor")
 
-    # --- 4. ДОБАВЛЕНИЕ КОНТРАКТОВ (ВНИЗУ) ---
-    st.divider()
-    with st.expander("📝 Добавить контракт к существующей закупке"):
-        # Создаем список для выбора: "ID: Наименование"
-        choice_list = {f"ID {row['id']}: {row['name'][:50]}...": row['id'] for idx, row in df.iterrows()}
-        selected_choice = st.selectbox("Выберите закупку", choice_list.keys())
+        # Кнопка сохранения изменений в таблице
+        if st.button("💾 Сохранить изменения в таблице"):
+            for index, row in edited_df.iterrows():
+                update_purchase(tuple(row))
+            st.success("Данные обновлены!")
+    else:
+        st.info("Реестр пуст")
 
-        c_col1, c_col2 = st.columns(2)
-        c_info = c_col1.text_input("Данные контракта (№, дата)")
-        c_sum = c_col2.number_input("Сумма контракта", min_value=0.0)
+with col_details:
+    st.subheader("🔗 Детали контрактов")
+    if not df.empty:
+        # Выбираем строку для просмотра контрактов
+        selected_id = st.selectbox("Выберите закупку для контрактов", df['id'],
+                                   format_func=lambda x: f"ID {x}: {df[df['id'] == x]['name'].values[0][:30]}...")
 
-        if st.button("Привязать контракт"):
-            p_id = choice_list[selected_choice]
-            conn = get_connection()
-            conn.cursor().execute("INSERT INTO contracts (purchase_id, contract_info, contract_sum) VALUES (?,?,?)",
-                                  (int(p_id), c_info, c_sum))
-            conn.commit()
-            conn.close()
-            st.success("Контракт добавлен!")
-            st.rerun()
-else:
-    st.info("Пока данных нет. Используйте панель слева 👈")
+        # Показываем существующие контракты
+        conn = get_connection()
+        c_df = pd.read_sql_query(f"SELECT * FROM contracts WHERE purchase_id={selected_id}", conn)
+        conn.close()
+
+        if not c_df.empty:
+            st.write("Список контрактов:")
+            st.dataframe(c_df.drop(columns=['id', 'purchase_id']), hide_index=True)
+
+        # Форма добавления контракта (то, что просила мама)
+        with st.form("add_contract"):
+            st.markdown("**Новый контракт**")
+            c_num = st.text_input("№ контракта")
+            c_date = st.text_input("Дата (дд.мм.гггг)")
+            c_1s = st.text_input("№ 1С")
+            c_ifo = st.text_input("ИФО")
+            c_sum = st.number_input("Сумма", format="%.2f", step=0.01)
+            c_extra = st.number_input("Доп. сумма", format="%.2f", step=0.01)
+
+            if st.form_submit_button("Привязать контракт"):
+                conn = get_connection()
+                conn.cursor().execute('''INSERT INTO contracts
+                                         (purchase_id, contract_num, contract_date, one_s_num, ifo, contract_sum,
+                                          extra_sum)
+                                         VALUES (?, ?, ?, ?, ?, ?, ?)''',
+                                      (selected_id, c_num, c_date, c_1s, c_ifo, c_sum, c_extra))
+                conn.commit()
+                conn.close()
+                st.rerun()
