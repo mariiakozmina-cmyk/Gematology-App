@@ -92,7 +92,6 @@ with st.expander("➕ Добавить новую позицию", expanded=True
         year_pl = row1[2].selectbox("Год размещения", list(range(2026, 2031)))
 
         row2 = st.columns(3)
-        # Текстовый ввод без кнопок +/-, авто-формат копеек при сохранении
         p26_raw = row2[0].text_input("Планируемая сумма, руб.; 2026 год", value="0.00")
         p27_raw = row2[1].text_input("Планируемая сумма, руб.; 2027 год", value="0.00")
         p28_raw = row2[2].text_input("Планируемая сумма, руб.; 2028 год", value="0.00")
@@ -137,7 +136,6 @@ conn.close()
 if not df.empty:
     st.subheader("Главный реестр (редактируемый)")
 
-    # Переименовываем для красоты
     display_df = df.copy()
     display_df.columns = [
         "ID", "Подразделение", "Наименование", "Год размещения",
@@ -145,16 +143,14 @@ if not df.empty:
         "ОКПД2", "КОСГУ", "Основание", "ИФО", "№ предл.", "№ графика"
     ]
 
-    # Полностью редактируемая таблица с выбором строк
+    # Редактируемая таблица БЕЗ сложного параметра выбора
     edited_df = st.data_editor(
         display_df,
         use_container_width=True,
         hide_index=True,
-        key="editor",
-        selection_mode="single_row"
+        key="editor"
     )
 
-    # Кнопка сохранения правок из таблицы
     if st.button("💾 Применить правки из таблицы"):
         conn = get_connection()
         cur = conn.cursor()
@@ -177,37 +173,37 @@ if not df.empty:
                          row[12], row[0]))
         conn.commit()
         conn.close()
-        st.success("Изменения в базе обновлены!")
+        st.success("Изменения сохранены!")
 
-    # --- БЛОК КОНТРАКТОВ (появляется при выборе строки) ---
-    selected_indices = st.session_state.get("editor", {}).get("selection", {}).get("rows", [])
-    if selected_indices:
-        sel_idx = selected_indices[0]
-        sel_row = df.iloc[sel_idx]
+    # --- БЛОК КОНТРАКТОВ (Выбор через выпадающий список) ---
+    st.divider()
+    st.subheader("🔗 Работа с контрактами")
 
-        st.divider()
-        st.subheader(f"🔗 Контракты по позиции: {sel_row['name']}")
+    # Мама выбирает название из списка, программа находит ID
+    selected_name = st.selectbox("Выберите закупку для добавления контракта", df['name'].unique())
+    sel_row = df[df['name'] == selected_name].iloc[0]
 
-        c_left, c_right = st.columns(2)
+    c_left, c_right = st.columns(2)
 
-        with c_left:
-            with st.form("new_contract"):
-                c_num = st.text_input("№ контракта")
-                c_1s = st.text_input("№ 1С")
-                c_sum = st.text_input("Сумма контракта", value="0.00")
-                if st.form_submit_button("Привязать контракт"):
-                    conn = get_connection()
-                    conn.cursor().execute(
-                        "INSERT INTO contracts (purchase_id, contract_num, one_s_num, contract_sum) VALUES (?,?,?,?)",
-                        (int(sel_row['id']), c_num, c_1s, float(to_money(c_sum))))
-                    conn.commit()
-                    conn.close()
-                    st.rerun()
+    with c_left:
+        with st.form("new_contract"):
+            st.write(f"Добавление к: **{selected_name}**")
+            c_num = st.text_input("№ контракта")
+            c_1s = st.text_input("№ 1С")
+            c_sum_raw = st.text_input("Сумма контракта", value="0.00")
+            if st.form_submit_button("Привязать контракт"):
+                conn = get_connection()
+                conn.cursor().execute(
+                    "INSERT INTO contracts (purchase_id, contract_num, one_s_num, contract_sum) VALUES (?,?,?,?)",
+                    (int(sel_row['id']), c_num, c_1s, float(to_money(c_sum_raw))))
+                conn.commit()
+                conn.close()
+                st.rerun()
 
-        with c_right:
-            conn = get_connection()
-            contracts = pd.read_sql_query(
-                f"SELECT contract_num, one_s_num, contract_sum FROM contracts WHERE purchase_id={sel_row['id']}", conn)
-            conn.close()
-            st.write("Список привязанных контрактов:")
-            st.dataframe(contracts, use_container_width=True, hide_index=True)
+    with c_right:
+        conn = get_connection()
+        contracts = pd.read_sql_query(
+            f"SELECT contract_num, one_s_num, contract_sum FROM contracts WHERE purchase_id={sel_row['id']}", conn)
+        conn.close()
+        st.write("Привязанные контракты:")
+        st.dataframe(contracts, use_container_width=True, hide_index=True)
