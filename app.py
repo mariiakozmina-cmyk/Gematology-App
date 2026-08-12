@@ -12,21 +12,15 @@ def format_okpd(raw_text):
     return ".".join(clean[i:i + 2] for i in range(0, len(clean), 2))
 
 
-def to_money(val):
-    try:
-        return "{:.2f}".format(float(val.replace(',', '.').replace(' ', '')))
-    except:
-        return "0.00"
-
-
-# --- БАЗА ДАННЫХ ---
+# --- БАЗА ДАННЫХ (Версия 11) ---
 def get_connection():
-    return sqlite3.connect('procurement_v8.db')
+    return sqlite3.connect('procurement_v11.db')
 
 
 def init_db():
     conn = get_connection()
     c = conn.cursor()
+    # Главная таблица (закупки)
     c.execute('''CREATE TABLE IF NOT EXISTS purchases
                  (
                      id
@@ -40,25 +34,27 @@ def init_db():
                      TEXT,
                      year_placement
                      INTEGER,
-                     plan_2026
-                     REAL,
-                     plan_2027
-                     REAL,
-                     plan_2028
-                     REAL,
+                     ifo
+                     TEXT,
                      okpd2
                      TEXT,
                      kosgu
                      TEXT,
                      basis
                      TEXT,
-                     ifo
-                     TEXT,
                      request_num
                      TEXT,
                      plan_graph_num
-                     TEXT
+                     TEXT,
+                     plan_2026
+                     REAL,
+                     plan_2027
+                     REAL,
+                     plan_2028
+                     REAL
                  )''')
+
+    # Отдельная таблица для контрактов
     c.execute('''CREATE TABLE IF NOT EXISTS contracts
                  (
                      id
@@ -75,135 +71,137 @@ def init_db():
                      contract_sum
                      REAL
                  )''')
+
+    # Таблица для распределения бюджета по ИФО
+    c.execute('''CREATE TABLE IF NOT EXISTS budget_breakdown
+                 (
+                     purchase_id
+                     INTEGER,
+                     year
+                     INTEGER,
+                     ifo_name
+                     TEXT,
+                     amount
+                     REAL
+                 )''')
     conn.commit()
     conn.close()
 
 
 init_db()
 
+IFO_SOURCES = ["ВБ", "ГЗ", "ОМС", "Прочее"]
+
 st.title("📋 Реестр закупок")
 
 # --- ФОРМА ВВОДА ---
 with st.expander("➕ Добавить новую позицию", expanded=True):
     with st.form("new_entry", clear_on_submit=True):
-        row1 = st.columns([2, 3, 1])
+        row1 = st.columns([2, 3, 1, 2])
         sub = row1[0].selectbox("Подразделение", ["Автохозяйство", "Админ. отдел", "Лаборатория", "АХО"])
         name = row1[1].text_input("Наименование")
-        year_pl = row1[2].selectbox("Год размещения", list(range(2026, 2031)))
+        y_place = row1[2].selectbox("Год размещения", list(range(2026, 2031)))
+        ifo_main = row1[3].multiselect("ИФО (источники)", IFO_SOURCES, default=["ГЗ"])
 
-        row2 = st.columns(3)
-        p26_raw = row2[0].text_input("Планируемая сумма, руб.; 2026 год", value="0.00")
-        p27_raw = row2[1].text_input("Планируемая сумма, руб.; 2027 год", value="0.00")
-        p28_raw = row2[2].text_input("Планируемая сумма, руб.; 2028 год", value="0.00")
+        row2 = st.columns([2, 1, 1])
+        okpd_raw = row2[0].text_input("ОКПД2 (вводите цифры)", placeholder="Напр: 123456")
+        kosgu = row2[1].selectbox("КОСГУ", ["225", "226", "310", "340"])
+        basis = row2[2].selectbox("Основание", ["44-ФЗ", "223-ФЗ", "ВБ", "ГЗ", "ОМС"])
 
-        row3 = st.columns(4)
-        okpd_raw = row3[0].text_input("ОКПД2", placeholder="123456")
-        kosgu = row3[1].selectbox("КОСГУ", ["225", "226", "310", "340"])
-        basis = row3[2].selectbox("Основание", ["44-ФЗ", "223-ФЗ", "ВБ", "ГЗ", "ОМС"])
+        row3 = st.columns(2)
+        req_n = row3[0].text_input("Номер предложения на закупку")
+        graph_n = row3[1].text_input("Номер план-графика")
 
-        ifo_list = ["00000000000000000130", "00000000000000000180", "Свой вариант..."]
-        ifo_sel = row3[3].selectbox("ИФО", ifo_list)
-        final_ifo = ifo_sel
-        if ifo_sel == "Свой вариант...":
-            final_ifo = st.text_input("Введите ИФО вручную")
-
-        row4 = st.columns(2)
-        req_n = row4[0].text_input("Номер предложения на закупку")
-        graph_n = row4[1].text_input("Номер план-графика")
-
-        if st.form_submit_button("Сохранить"):
-            p26 = float(to_money(p26_raw))
-            p27 = float(to_money(p27_raw))
-            p28 = float(to_money(p28_raw))
+        if st.form_submit_button("Сохранить позицию"):
             okpd_fixed = format_okpd(okpd_raw)
-
             conn = get_connection()
-            conn.cursor().execute('''INSERT INTO purchases
-                                     (subdivision, name, year_placement, plan_2026, plan_2027, plan_2028, okpd2, kosgu,
-                                      basis, ifo, request_num, plan_graph_num)
-                                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
-                                  (sub, name, year_pl, p26, p27, p28, okpd_fixed, kosgu, basis, final_ifo, req_n,
-                                   graph_n))
+            conn.execute('''INSERT INTO purchases
+                            (subdivision, name, year_placement, ifo, okpd2, kosgu, basis, request_num, plan_graph_num,
+                             plan_2026, plan_2027, plan_2028)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 0)''',
+                         (sub, name, y_place, ", ".join(ifo_main), okpd_fixed, kosgu, basis, req_n, graph_n))
             conn.commit()
             conn.close()
             st.rerun()
 
-# --- ТАБЛИЦА С ДАННЫМИ ---
+# --- ОСНОВНАЯ ТАБЛИЦА ---
 conn = get_connection()
 df = pd.read_sql_query("SELECT * FROM purchases", conn)
 conn.close()
 
 if not df.empty:
-    st.subheader("Главный реестр (редактируемый)")
+    st.subheader("Главный реестр")
+    edited_df = st.data_editor(df, use_container_width=True, hide_index=True, key="main_table")
 
-    display_df = df.copy()
-    display_df.columns = [
-        "ID", "Подразделение", "Наименование", "Год размещения",
-        "Планируемая сумма, руб.; 2026 год", "Планируемая сумма, руб.; 2027 год", "Планируемая сумма, руб.; 2028 год",
-        "ОКПД2", "КОСГУ", "Основание", "ИФО", "№ предл.", "№ графика"
-    ]
-
-    # Редактируемая таблица БЕЗ сложного параметра выбора
-    edited_df = st.data_editor(
-        display_df,
-        use_container_width=True,
-        hide_index=True,
-        key="editor"
-    )
-
-    if st.button("💾 Применить правки из таблицы"):
+    if st.button("💾 Сохранить правки в таблице"):
         conn = get_connection()
-        cur = conn.cursor()
         for _, row in edited_df.iterrows():
-            cur.execute('''UPDATE purchases
-                           SET subdivision=?,
-                               name=?,
-                               year_placement=?,
-                               plan_2026=?,
-                               plan_2027=?,
-                               plan_2028=?,
-                               okpd2=?,
-                               kosgu=?,
-                               basis=?,
-                               ifo=?,
-                               request_num=?,
-                               plan_graph_num=?
-                           WHERE id = ?''',
-                        (row[1], row[2], row[3], row[4], row[5], row[6], row[7], row[8], row[9], row[10], row[11],
-                         row[12], row[0]))
+            conn.execute('''UPDATE purchases
+                            SET subdivision=?,
+                                name=?,
+                                year_placement=?,
+                                ifo=?,
+                                okpd2=?,
+                                kosgu=?,
+                                basis=?,
+                                request_num=?,
+                                plan_graph_num=?,
+                                plan_2026=?,
+                                plan_2027=?,
+                                plan_2028=?
+                            WHERE id = ?''',
+                         (row[1], row[2], row[3], row[4], row[5], row[6], row[7], row[8], row[9], row[10], row[11],
+                          row[12], row[0]))
         conn.commit()
         conn.close()
-        st.success("Изменения сохранены!")
+        st.success("Данные обновлены!")
 
-    # --- БЛОК КОНТРАКТОВ (Выбор через выпадающий список) ---
+    # --- БЛОК КОНТРАКТОВ И ИФО ---
     st.divider()
-    st.subheader("🔗 Работа с контрактами")
-
-    # Мама выбирает название из списка, программа находит ID
-    selected_name = st.selectbox("Выберите закупку для добавления контракта", df['name'].unique())
-    sel_row = df[df['name'] == selected_name].iloc[0]
+    selected_name = st.selectbox("Выберите закупку для работы", df['name'].unique())
+    sel_id = int(df[df['name'] == selected_name]['id'].values[0])
 
     c_left, c_right = st.columns(2)
 
     with c_left:
-        with st.form("new_contract"):
-            st.write(f"Добавление к: **{selected_name}**")
+        st.subheader("💰 Распределение ИФО")
+        years = [2026, 2027, 2028]
+        for year in years:
+            with st.container(border=True):
+                st.write(f"**Бюджет {year}**")
+                for source in IFO_SOURCES:
+                    conn = get_connection()
+                    old_val = conn.execute(
+                        "SELECT amount FROM budget_breakdown WHERE purchase_id=? AND year=? AND ifo_name=?",
+                        (sel_id, year, source)).fetchone()
+                    conn.close()
+                    val = st.number_input(f"{source} ({year})", value=old_val[0] if old_val else 0.0, format="%.2f",
+                                          key=f"b_{sel_id}_{year}_{source}")
+
+                    conn = get_connection()
+                    conn.execute("DELETE FROM budget_breakdown WHERE purchase_id=? AND year=? AND ifo_name=?",
+                                 (sel_id, year, source))
+                    conn.execute("INSERT INTO budget_breakdown VALUES (?,?,?,?)", (sel_id, year, source, val))
+                    conn.commit()
+                    conn.close()
+
+    with c_right:
+        st.subheader("🔗 Контракты")
+        with st.form("add_contract"):
             c_num = st.text_input("№ контракта")
             c_1s = st.text_input("№ 1С")
-            c_sum_raw = st.text_input("Сумма контракта", value="0.00")
-            if st.form_submit_button("Привязать контракт"):
+            c_sum = st.number_input("Сумма", format="%.2f")
+            if st.form_submit_button("Добавить контракт"):
                 conn = get_connection()
-                conn.cursor().execute(
+                conn.execute(
                     "INSERT INTO contracts (purchase_id, contract_num, one_s_num, contract_sum) VALUES (?,?,?,?)",
-                    (int(sel_row['id']), c_num, c_1s, float(to_money(c_sum_raw))))
+                    (sel_id, c_num, c_1s, c_sum))
                 conn.commit()
                 conn.close()
                 st.rerun()
 
-    with c_right:
         conn = get_connection()
-        contracts = pd.read_sql_query(
-            f"SELECT contract_num, one_s_num, contract_sum FROM contracts WHERE purchase_id={sel_row['id']}", conn)
+        conts = pd.read_sql_query(
+            f"SELECT contract_num, one_s_num, contract_sum FROM contracts WHERE purchase_id={sel_id}", conn)
         conn.close()
-        st.write("Привязанные контракты:")
-        st.dataframe(contracts, use_container_width=True, hide_index=True)
+        st.dataframe(conts, use_container_width=True)
