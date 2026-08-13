@@ -23,7 +23,7 @@ def capitalize_first_letter(text):
     return text[0].upper() + text[1:]
 
 
-# --- БАЗА ДАННЫХ (Версия 10 с авто-миграцией) ---
+# --- БАЗА ДАННЫХ (Версия 11) ---
 def get_connection():
     return sqlite3.connect('procurement_v10.db')
 
@@ -64,7 +64,8 @@ def init_db():
                      purchase_id INTEGER,
                      year INTEGER,
                      contract_name TEXT,
-                     amount REAL
+                     amount REAL,
+                     onec_num TEXT
                  )''')
 
     try:
@@ -74,6 +75,11 @@ def init_db():
 
     try:
         c.execute("ALTER TABLE purchases ADD COLUMN nmck_2027 REAL DEFAULT 0")
+    except sqlite3.OperationalError:
+        pass
+
+    try:
+        c.execute("ALTER TABLE nmck_breakdown ADD COLUMN onec_num TEXT")
     except sqlite3.OperationalError:
         pass
 
@@ -122,7 +128,7 @@ with st.expander("➕ Добавить новую позицию", expanded=True
             st.success(f"Добавлено! ОКПД2 отформатирован: {okpd_fixed}")
             st.rerun()
 
-# --- ОСНОВНАЯ ТАБЛИЦА ---
+# --- ОСНОВНАЯ ТАБЛИЦА (Без 2028 года!) ---
 conn = get_connection()
 df = pd.read_sql_query("SELECT * FROM purchases", conn)
 conn.close()
@@ -130,15 +136,20 @@ conn.close()
 if not df.empty:
     st.subheader("Главный реестр")
 
-    display_df = df.copy()
+    # Формируем таблицу БЕЗ 2028 года
+    display_df = df[[
+        "id", "subdivision", "name", "year_placement", "ifo",
+        "okpd2", "kosgu", "basis", "request_num", "plan_graph_num",
+        "plan_2026", "plan_2027", "nmck_2026", "nmck_2027"
+    ]].copy()
+
     display_df.columns = [
         "ID", "Подразделение", "Наименование", "Год размещения", "ИФО",
         "ОКПД2", "КОСГУ", "Основание", "Номер предложения на закупку", "Номер план-графика",
-        "Планируемая сумма, руб.; 2026 год", "Планируемая сумма, руб.; 2027 год", "Планируемая сумма, руб.; 2028 год",
+        "Планируемая сумма, руб.; 2026 год", "Планируемая сумма, руб.; 2027 год",
         "Сумма по заявкам НМЦК 2026 год", "Сумма по заявкам НМЦК 2027 год"
     ]
 
-    # Редактируемая таблица
     edited_df = st.data_editor(
         display_df,
         use_container_width=True,
@@ -149,7 +160,6 @@ if not df.empty:
     if st.button("💾 Применить правки из таблицы"):
         conn = get_connection()
         for _, row in edited_df.iterrows():
-            # Обращаемся строго по имени колонки, чтобы избежать KeyError
             updated_name = capitalize_first_letter(row["Наименование"])
             conn.execute('''UPDATE purchases
                             SET subdivision=?,
@@ -163,7 +173,6 @@ if not df.empty:
                                 plan_graph_num=?,
                                 plan_2026=?,
                                 plan_2027=?,
-                                plan_2028=?,
                                 nmck_2026=?,
                                 nmck_2027=?
                             WHERE id = ?''',
@@ -171,67 +180,65 @@ if not df.empty:
                           row["ИФО"], row["ОКПД2"], row["КОСГУ"], row["Основание"],
                           row["Номер предложения на закупку"], row["Номер план-графика"],
                           row["Планируемая сумма, руб.; 2026 год"], row["Планируемая сумма, руб.; 2027 год"],
-                          row["Планируемая сумма, руб.; 2028 год"],
                           row["Сумма по заявкам НМЦК 2026 год"], row["Сумма по заявкам НМЦК 2027 год"],
                           row["ID"]))
         conn.commit()
         conn.close()
         st.success("Все изменения в базе сохранены!")
 
-    # --- УДОБНЫЙ ВЫБОР ЗАКУПКИ ДЛЯ 1000 СТРОК ---
+    # --- УМНЫЙ СВЯЗАННЫЙ ПОИСК ЗАКУПКИ (НАЗВАНИЕ ➡️ ФИЛЬТР ID) ---
     st.divider()
     st.markdown("### 🎯 Выбор позиции для распределения ИФО и заявок НМЦК")
 
-    col_select1, col_select2 = st.columns([2, 3])
+    col_s1, col_s2 = st.columns(2)
 
-    with col_select1:
-        st.caption("Нажмите на строку ниже, чтобы сразу выбрать закупку:")
-        select_event = st.dataframe(
-            df[['id', 'subdivision', 'name']],
-            use_container_width=True,
-            hide_index=True,
-            on_select="rerun",
-            selection_mode="single-row",
-            key="quick_row_selector"
-        )
+    with col_s1:
+        all_names = list(df['name'].unique())
+        chosen_name = st.selectbox("🔍 Поиск закупки по названию:", options=["-- Выберите --"] + all_names, key="search_name_box")
 
-    selected_from_click = None
-    if select_event and hasattr(select_event, 'selection') and select_event.selection.get("rows"):
-        clicked_idx = select_event.selection["rows"][0]
-        if clicked_idx < len(df):
-            selected_from_click = df.iloc[clicked_idx]['name']
+    # Фильтруем список доступных ID на основе выбранного названия
+    if chosen_name != "-- Выберите --":
+        matching_ids = list(df[df['name'] == chosen_name]['id'].unique())
+    else:
+        matching_ids = list(df['id'].unique())
 
-    all_names = list(df['name'].unique())
-    default_select_idx = 0
-    if selected_from_click and selected_from_click in all_names:
-        default_select_idx = all_names.index(selected_from_click)
+    with col_s2:
+        chosen_id = st.selectbox("🔢 Поиск по ID (индексу):", options=["-- Выберите ID --"] + matching_ids, key="search_id_box")
 
-    with col_select2:
-        st.caption("Или введите первые буквы названия в поле ниже (быстрый поиск):")
-        selected_name = st.selectbox(
-            "Поиск закупки по названию:",
-            options=all_names,
-            index=default_select_idx,
-            key="purchase_search_selectbox"
-        )
+    # Определение итогового выбранного ID
+    selected_id = None
+    if chosen_id != "-- Выберите ID --":
+        selected_id = int(chosen_id)
+    elif chosen_name != "-- Выберите --":
+        selected_id = int(matching_ids[0])
 
     # --- БЛОКИ ВВОДА ДАННЫХ (ИФО И НМЦК) ---
-    if selected_name:
-        sel_id = int(df[df['name'] == selected_name]['id'].values[0])
-        st.success(f"📌 Выбрана позиция: **{selected_name}** (ID: {sel_id})")
+    if selected_id:
+        row_data = df[df['id'] == selected_id].iloc[0]
+        selected_name = row_data['name']
+        sel_id = int(row_data['id'])
 
-        # --- БЛОК 1: РАСПРЕДЕЛЕНИЕ БЮДЖЕТА ПО ИСТОЧНИКАМ (ИФО) ---
+        # Определяем выбранные при создании ИФО (источники)
+        raw_ifo_str = str(row_data['ifo']) if pd.notna(row_data['ifo']) else ""
+        selected_sources = [s.strip() for s in raw_ifo_str.split(",") if s.strip()]
+        # Если источники не указаны, показываем все базовые
+        if not selected_sources:
+            selected_sources = IFO_SOURCES
+
+        st.success(f"📌 Выбрана позиция: **{selected_name}** (ID: {sel_id}, ИФО в позиции: {', '.join(selected_sources)})")
+
+        # --- БЛОК 1: РАСПРЕДЕЛЕНИЕ БЮДЖЕТА ПО ИСТОЧНИКАМ (ТОЛЬКО ВЫБРАННЫЕ ИФО, 2026 и 2027 ГОДЫ) ---
         st.subheader("💰 Распределение бюджета по источникам (ИФО)")
 
-        years = [2026, 2027, 2028]
-        cols = st.columns(3)
+        years = [2026, 2027]  # 2028 год убран!
+        cols = st.columns(2)
 
         for i, year in enumerate(years):
             with cols[i]:
                 st.markdown(f"**Бюджет на {year} год**")
                 with st.container(border=True):
                     total_for_year = 0.0
-                    for source in IFO_SOURCES:
+                    for source in selected_sources:  # Покажем строго выбравшиеся источники!
                         conn = get_connection()
                         old_val = conn.execute(
                             "SELECT amount FROM budget_breakdown WHERE purchase_id=? AND year=? AND ifo_name=?",
@@ -255,7 +262,7 @@ if not df.empty:
                     conn.commit()
                     conn.close()
 
-        # --- БЛОК 2: СУММА ПО ЗАЯВКАМ НМЦК (2026 И 2027 ГОДЫ) ---
+        # --- БЛОК 2: СУММА ПО ЗАЯВКАМ НМЦК ---
         st.divider()
         st.subheader("📝 Сумма по заявкам НМЦК (Контракты)")
 
@@ -268,35 +275,36 @@ if not df.empty:
                 with st.container(border=True):
                     conn = get_connection()
                     contracts = conn.execute(
-                        "SELECT id, contract_name, amount FROM nmck_breakdown WHERE purchase_id=? AND year=?",
+                        "SELECT id, contract_name, amount, onec_num FROM nmck_breakdown WHERE purchase_id=? AND year=?",
                         (sel_id, year)).fetchall()
                     conn.close()
 
                     total_nmck_year = sum(c[2] for c in contracts)
+                    next_auto_num = f"№{len(contracts) + 1}"
 
                     if contracts:
-                        for cid, cname, camount in contracts:
-                            c_col1, c_col2, c_col3 = st.columns([3, 2, 1])
-                            c_col1.write(f"📄 {cname}")
-                            c_col2.write(f"{camount:,.2f} руб.")
-                            if c_col3.button("❌", key=f"del_nmck_{cid}"):
+                        for idx, (cid, cname, camount, onec_val) in enumerate(contracts, start=1):
+                            c_col1, c_col2, c_col3, c_col4 = st.columns([1, 2, 2, 1])
+                            c_col1.write(f"**№{idx}**")
+                            c_col2.write(f"1С: {onec_val if onec_val else '—'}")
+                            c_col3.write(f"{camount:,.2f} руб.")
+                            if c_col4.button("❌", key=f"del_nmck_{cid}"):
                                 conn = get_connection()
                                 conn.execute("DELETE FROM nmck_breakdown WHERE id=?", (cid,))
                                 conn.commit()
                                 conn.close()
                                 st.rerun()
 
-                    st.caption("Добавить заявку / контракт:")
+                    st.caption(f"Добавить заявку ({next_auto_num}):")
                     add_col1, add_col2 = st.columns([2, 2])
-                    new_cname = add_col1.text_input(f"Название/Номер ({year})", key=f"new_cname_{sel_id}_{year}")
-                    new_camount = add_col2.number_input(f"Сумма, руб. ({year})", value=0.0, format="%.2f", key=f"new_camount_{sel_id}_{year}")
+                    new_onec = add_col1.text_input("Номер 1С", key=f"new_onec_{sel_id}_{year}")
+                    new_camount = add_col2.number_input("Сумма, руб.", value=0.0, format="%.2f", key=f"new_camount_{sel_id}_{year}")
 
-                    if st.button(f"➕ Добавить заявку ({year})", key=f"btn_add_nmck_{sel_id}_{year}"):
+                    if st.button(f"➕ Добавить заявку {next_auto_num} ({year})", key=f"btn_add_nmck_{sel_id}_{year}"):
                         if new_camount > 0:
-                            c_label = new_cname if new_cname else "Заявка"
                             conn = get_connection()
-                            conn.execute("INSERT INTO nmck_breakdown (purchase_id, year, contract_name, amount) VALUES (?,?,?,?)",
-                                         (sel_id, year, c_label, new_camount))
+                            conn.execute("INSERT INTO nmck_breakdown (purchase_id, year, contract_name, amount, onec_num) VALUES (?,?,?,?,?)",
+                                         (sel_id, year, next_auto_num, new_camount, new_onec))
                             conn.commit()
                             conn.close()
                             st.rerun()
