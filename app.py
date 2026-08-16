@@ -530,14 +530,24 @@ if not df.empty:
                     st.markdown(f"**Заявки на {year} год**")
                     with st.container(border=True):
                         conn = get_connection()
+
+                        # Множество номеров 1С, по которым УЖЕ заключены контракты
+                        contracted_1c_tuples = conn.execute(
+                            "SELECT DISTINCT onec_num FROM contracts WHERE purchase_id=? AND year=? AND onec_num IS NOT NULL AND onec_num != ''",
+                            (sel_id, year)).fetchall()
+                        contracted_1c_set = set(t[0] for t in contracted_1c_tuples)
+
                         applications = conn.execute(
                             "SELECT id, onec_num FROM nmck_applications WHERE purchase_id=? AND year=?",
                             (sel_id, year)).fetchall()
 
+                        # Отфильтровываем только АКТИВНЫЕ (еще не сыгранные в контракт) заявки
+                        active_applications = [app for app in applications if app[1] not in contracted_1c_set]
+
                         total_nmck_year = 0.0
 
-                        if applications:
-                            for app_idx, (app_id, onec_val) in enumerate(applications, start=1):
+                        if active_applications:
+                            for app_idx, (app_id, onec_val) in enumerate(active_applications, start=1):
                                 app_ifo_amounts = conn.execute(
                                     "SELECT id, ifo_source, amount FROM nmck_app_ifo_amounts WHERE app_id=?",
                                     (app_id,)).fetchall()
@@ -558,10 +568,17 @@ if not df.empty:
                                             (sel_id, year, source)).fetchone()
                                         budget_ifo = budget_ifo[0] if budget_ifo else 0.0
 
+                                        # Учитываем только активные (нессыгранные) заявки
                                         current_nmck_ifo_sum = conn.execute(
-                                            "SELECT SUM(t2.amount) FROM nmck_applications t1 JOIN nmck_app_ifo_amounts t2 ON t1.id = t2.app_id WHERE t1.purchase_id=? AND t1.year=? AND t2.ifo_source=?",
-                                            (sel_id, year, source)).fetchone()
-                                        current_nmck_ifo_sum = current_nmck_ifo_sum[0] if current_nmck_ifo_sum[0] is not None else 0.0
+                                            """SELECT SUM(t2.amount) 
+                                               FROM nmck_applications t1 
+                                               JOIN nmck_app_ifo_amounts t2 ON t1.id = t2.app_id 
+                                               WHERE t1.purchase_id=? AND t1.year=? AND t2.ifo_source=?
+                                               AND (t1.onec_num IS NULL OR t1.onec_num = '' OR t1.onec_num NOT IN (
+                                                   SELECT DISTINCT onec_num FROM contracts WHERE purchase_id=? AND year=? AND onec_num IS NOT NULL AND onec_num != ''
+                                               ))""",
+                                            (sel_id, year, source, sel_id, year)).fetchone()
+                                        current_nmck_ifo_sum = current_nmck_ifo_sum[0] if (current_nmck_ifo_sum and current_nmck_ifo_sum[0] is not None) else 0.0
 
                                         st.write(f"- **{source}**: <span style='color: #047857; font-weight: bold;'>{fmt_num(budget_ifo - current_nmck_ifo_sum)}</span>", unsafe_allow_html=True)
 
@@ -610,10 +627,17 @@ if not df.empty:
                                 (sel_id, year, source)).fetchone()
                             budget_ifo_val = budget_ifo_val[0] if budget_ifo_val else 0.0
 
+                            # Расчет остатка только по АКТИВНЫМ (несыгранным) заявкам
                             prev_apps_sum = conn.execute(
-                                "SELECT SUM(t2.amount) FROM nmck_applications t1 JOIN nmck_app_ifo_amounts t2 ON t1.id = t2.app_id WHERE t1.purchase_id=? AND t1.year=? AND t2.ifo_source=?",
-                                (sel_id, year, source)).fetchone()
-                            prev_apps_sum = prev_apps_sum[0] if prev_apps_sum[0] is not None else 0.0
+                                """SELECT SUM(t2.amount) 
+                                   FROM nmck_applications t1 
+                                   JOIN nmck_app_ifo_amounts t2 ON t1.id = t2.app_id 
+                                   WHERE t1.purchase_id=? AND t1.year=? AND t2.ifo_source=?
+                                   AND (t1.onec_num IS NULL OR t1.onec_num = '' OR t1.onec_num NOT IN (
+                                       SELECT DISTINCT onec_num FROM contracts WHERE purchase_id=? AND year=? AND onec_num IS NOT NULL AND onec_num != ''
+                                   ))""",
+                                (sel_id, year, source, sel_id, year)).fetchone()
+                            prev_apps_sum = prev_apps_sum[0] if (prev_apps_sum and prev_apps_sum[0] is not None) else 0.0
 
                             rem_avail = budget_ifo_val - prev_apps_sum
 
@@ -701,7 +725,8 @@ if not df.empty:
                                 full_contract_total = sum(effective_contract_ifo_map.values())
                                 total_played_year += full_contract_total
 
-                                st.markdown(f'<span class="badge-contract">📜 Контракт №{idx}</span> (1С: <span class="badge-1c">{c1c}</span>, Дата: <b>{cdate}</b>)', unsafe_allow_html=True)
+                                display_cnt_num = cnum if cnum else f"№{idx}"
+                                st.markdown(f'<span class="badge-contract">📜 Контракт {display_cnt_num}</span> (1С: <span class="badge-1c">{c1c}</span>, Дата: <b>{cdate}</b>)', unsafe_allow_html=True)
                                 st.markdown('<div style="margin-top: 4px;"></div>', unsafe_allow_html=True)
                                 for source, effective_amount in effective_contract_ifo_map.items():
                                     st.write(f"- **{source}**: <span style='color: #0f172a; font-weight: 600;'>{fmt_num(effective_amount)}</span>", unsafe_allow_html=True)
@@ -724,6 +749,7 @@ if not df.empty:
 
                                 if st.session_state.get(f"editing_cnt_{contract_id}", False):
                                     with st.form(key=f"form_edit_cnt_{contract_id}"):
+                                        ec_num = st.text_input("Изменить Номер контракта", value=cnum if cnum else "")
                                         ec_1c = st.selectbox("Изменить 1С", options=avail_1c_from_apps, index=avail_1c_from_apps.index(c1c) if c1c in avail_1c_from_apps else 0)
                                         ec_date = st.date_input("Изменить Дату", value=datetime.strptime(cdate, "%d-%m-%Y").date(), format="DD-MM-YYYY")
                                         st.markdown("**Изменить суммы по ИФО (основа контракта):**")
@@ -733,8 +759,8 @@ if not df.empty:
                                             edited_contract_ifo_amounts[ifo_src] = st.number_input(f"{ifo_src}", value=init_cnt_amt, key=f"edit_contract_ifo_{item_id}")
                                         ec_comm = st.text_input("Изменить Комментарий", value=ccomm if ccomm else "")
                                         if st.form_submit_button("Сохранить изменения контракта"):
-                                            conn.execute("UPDATE contracts SET onec_num=?, contract_date=?, comment=? WHERE id=?",
-                                                         (ec_1c, ec_date.strftime("%d-%m-%Y"), ec_comm, contract_id))
+                                            conn.execute("UPDATE contracts SET contract_num=?, onec_num=?, contract_date=?, comment=? WHERE id=?",
+                                                         (ec_num, ec_1c, ec_date.strftime("%d-%m-%Y"), ec_comm, contract_id))
                                             for ifo_src, amount in edited_contract_ifo_amounts.items():
                                                 clean_amt = amount if amount is not None else 0.0
                                                 conn.execute("UPDATE contract_ifo_amounts SET amount=? WHERE contract_id=? AND ifo_source=?", (clean_amt, contract_id, ifo_src))
@@ -828,10 +854,11 @@ if not df.empty:
                                 st.session_state[cnt_counter_key] = 0
                             cur_cnt_cnt = st.session_state[cnt_counter_key]
 
-                            ca1, ca2, ca3 = st.columns([2, 2, 2])
-                            c_1c_sel = ca1.selectbox("Номер 1С (из заявок)", options=avail_1c_from_apps, key=f"c_1c_{sel_id}_{year}_{cur_cnt_cnt}")
-                            c_date_val = ca2.date_input("Дата контракта", format="DD-MM-YYYY", key=f"c_date_{sel_id}_{year}_{cur_cnt_cnt}")
-                            c_comm_val = ca3.text_input("Комментарий", key=f"c_comm_{sel_id}_{year}_{cur_cnt_cnt}")
+                            ca1, ca2, ca3, ca4 = st.columns([2, 2, 2, 2])
+                            c_num_input = ca1.text_input("Номер контракта", key=f"c_num_{sel_id}_{year}_{cur_cnt_cnt}")
+                            c_1c_sel = ca2.selectbox("Номер 1С (из заявок)", options=avail_1c_from_apps, key=f"c_1c_{sel_id}_{year}_{cur_cnt_cnt}")
+                            c_date_val = ca3.date_input("Дата контракта", format="DD-MM-YYYY", key=f"c_date_{sel_id}_{year}_{cur_cnt_cnt}")
+                            c_comm_val = ca4.text_input("Комментарий", key=f"c_comm_{sel_id}_{year}_{cur_cnt_cnt}")
 
                             st.markdown("**Суммы по источникам (основа контракта):**")
                             selected_app_id_for_1c = conn.execute("SELECT id FROM nmck_applications WHERE purchase_id=? AND year=? AND onec_num=?", (sel_id, year, c_1c_sel)).fetchone()
@@ -845,13 +872,14 @@ if not df.empty:
                                 app_def = float(selected_app_ifo_amounts.get(source, 0.0))
                                 new_contract_ifo_amounts[source] = st.number_input(f"{source}", value=None, placeholder=f"Из заявки: {fmt_num(app_def)}", key=f"new_cnt_ifo_{sel_id}_{year}_{source}_{cur_cnt_cnt}")
 
-                            if st.button(f"➕ Добавить контракт {next_cnt_num} ({year})", key=f"btn_add_cnt_{sel_id}_{year}"):
+                            if st.button(f"➕ Добавить контракт ({year})", key=f"btn_add_cnt_{sel_id}_{year}"):
                                 clean_cnt_amounts = {src: (amt if amt is not None else 0.0) for src, amt in new_contract_ifo_amounts.items()}
                                 total_new_contract_amount = sum(clean_cnt_amounts.values())
                                 if total_new_contract_amount > 0:
+                                    cnt_num_to_save = c_num_input.strip() if c_num_input.strip() else next_cnt_num
                                     cursor = conn.execute(
                                         "INSERT INTO contracts (purchase_id, year, contract_num, onec_num, contract_date, comment) VALUES (?,?,?,?,?,?)",
-                                        (sel_id, year, next_cnt_num, c_1c_sel, c_date_val.strftime("%d-%m-%Y"), c_comm_val))
+                                        (sel_id, year, cnt_num_to_save, c_1c_sel, c_date_val.strftime("%d-%m-%Y"), c_comm_val))
                                     new_contract_id = cursor.lastrowid
                                     for ifo_src, amount in clean_cnt_amounts.items():
                                         if amount > 0:
@@ -862,6 +890,7 @@ if not df.empty:
                                     st.session_state[cnt_counter_key] += 1
                                     st.rerun()
 
+                        st.markdown("---")
                         st.markdown(f'<div class="total-summary">ИТОГО СЫГРАНО {year}: {fmt_num(total_played_year)}</div>', unsafe_allow_html=True)
 
                         conn.execute(f"UPDATE purchases SET played_{year} = ? WHERE id = ?", (total_played_year, sel_id))
