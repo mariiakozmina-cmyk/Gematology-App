@@ -176,6 +176,8 @@ def init_db():
                      basis TEXT,
                      request_num TEXT,
                      plan_graph_num TEXT,
+                     memo_num TEXT DEFAULT '',
+                     memo_date TEXT DEFAULT '',
                      plan_2027 REAL DEFAULT 0,
                      plan_2028 REAL DEFAULT 0,
                      nmck_2027 REAL DEFAULT 0,
@@ -185,6 +187,13 @@ def init_db():
                      rem_2027 REAL DEFAULT 0,
                      rem_2028 REAL DEFAULT 0
                  )''')
+
+    # Безопасное добавление новых колонок memo_num и memo_date для существующей БД
+    for col in ["memo_num", "memo_date"]:
+        try:
+            c.execute(f"ALTER TABLE purchases ADD COLUMN {col} TEXT DEFAULT ''")
+        except sqlite3.OperationalError:
+            pass
 
     c.execute('''CREATE TABLE IF NOT EXISTS budget_breakdown
                  (
@@ -298,6 +307,10 @@ with st.expander("➕ Добавить новую позицию", expanded=True
         req_n = row3[0].text_input("Номер предложения на закупку")
         graph_n = row3[1].text_input("Номер план-графика")
 
+        row4 = st.columns(2)
+        memo_n = row4[0].text_input("Номер служебной записки на закупку")
+        memo_d_val = row4[1].date_input("Дата служебной записки на закупку", value=None, format="DD-MM-YYYY")
+
         submit_btn = st.form_submit_button("Сохранить позицию")
 
         if submit_btn:
@@ -319,12 +332,15 @@ with st.expander("➕ Добавить новую позицию", expanded=True
 
                 okpd_fixed = format_okpd(okpd_raw)
                 name_fixed = capitalize_first_letter(name)
+                memo_d_str = memo_d_val.strftime("%d-%m-%Y") if memo_d_val else ""
+
                 conn = get_connection()
                 conn.execute('''INSERT INTO purchases
                                 (subdivision, name, year_placement, ifo, okpd2, kosgu, basis, request_num, plan_graph_num,
-                                 plan_2027, plan_2028, nmck_2027, nmck_2028, played_2027, played_2028, rem_2027, rem_2028)
-                                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 0, 0, 0, 0, 0, 0)''',
-                             (sub, name_fixed, y_place, ", ".join(final_ifo_list), okpd_fixed, kosgu, basis, req_n, graph_n))
+                                 memo_num, memo_date, plan_2027, plan_2028, nmck_2027, nmck_2028, played_2027, played_2028, rem_2027, rem_2028)
+                                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 0, 0, 0, 0, 0, 0)''',
+                             (sub, name_fixed, y_place, ", ".join(final_ifo_list), okpd_fixed, kosgu, basis, req_n, graph_n,
+                              memo_n, memo_d_str))
                 conn.commit()
                 conn.close()
                 st.success(f"Добавлено! Сохранено: {name_fixed}")
@@ -350,6 +366,10 @@ if not df.empty:
         filter_kosgu = f_col6.selectbox("КОСГУ:", ["Все"] + KOSGU_LIST)
         filter_basis = f_col7.selectbox("Основание:", ["Все"] + BASIS_LIST)
 
+        f_col8, f_col9 = st.columns(2)
+        filter_memo_num = f_col8.text_input("Номер служебной записки:")
+        filter_memo_date = f_col9.text_input("Дата служебной записки (ДД-ММ-ГГГГ):")
+
     filtered_df = df.copy()
     if filter_sub != "Все":
         filtered_df = filtered_df[filtered_df['subdivision'] == filter_sub]
@@ -365,6 +385,10 @@ if not df.empty:
         filtered_df = filtered_df[filtered_df['kosgu'] == filter_kosgu]
     if filter_basis != "Все":
         filtered_df = filtered_df[filtered_df['basis'] == filter_basis]
+    if filter_memo_num.strip():
+        filtered_df = filtered_df[filtered_df['memo_num'].str.contains(filter_memo_num.strip(), case=False, na=False)]
+    if filter_memo_date.strip():
+        filtered_df = filtered_df[filtered_df['memo_date'].str.contains(filter_memo_date.strip(), case=False, na=False)]
 
     filtered_df['rem_2027'] = filtered_df['plan_2027'] - filtered_df['nmck_2027'] - filtered_df['played_2027']
     filtered_df['rem_2028'] = filtered_df['plan_2028'] - filtered_df['nmck_2028'] - filtered_df['played_2028']
@@ -372,6 +396,7 @@ if not df.empty:
     display_df = filtered_df[[
         "id", "subdivision", "name", "year_placement", "ifo",
         "okpd2", "kosgu", "basis", "request_num", "plan_graph_num",
+        "memo_num", "memo_date",
         "plan_2027", "plan_2028", "nmck_2027", "nmck_2028",
         "played_2027", "played_2028", "rem_2027", "rem_2028"
     ]].copy()
@@ -382,6 +407,7 @@ if not df.empty:
     display_df.columns = [
         "ID", "Подразделение", "Наименование", "Год размещения", "ИФО",
         "ОКПД2", "КОСГУ", "Основание", "Номер предложения на закупку", "Номер план-графика",
+        "Номер служебной записки на закупку", "Дата служебной записки на закупку",
         "Планируемая сумма; 2027 год", "Планируемая сумма; 2028 год",
         "Сумма по заявкам НМЦК 2027 год", "Сумма по заявкам НМЦК 2028 год",
         "Сумма сыгранная 2027 год", "Сумма сыгранная 2028 год",
@@ -393,6 +419,8 @@ if not df.empty:
         "КОСГУ": st.column_config.TextColumn("КОСГУ", width="small"),
         "Основание": st.column_config.TextColumn("Основание", width="small"),
         "Год размещения": st.column_config.NumberColumn("Год размещения", width="small", format="%d"),
+        "Номер служебной записки на закупку": st.column_config.TextColumn("Номер СЗ на закупку"),
+        "Дата служебной записки на закупку": st.column_config.TextColumn("Дата СЗ на закупку"),
         "Планируемая сумма; 2027 год": st.column_config.TextColumn("Планируемая сумма; 2027 год"),
         "Планируемая сумма; 2028 год": st.column_config.TextColumn("Планируемая сумма; 2028 год"),
         "Сумма по заявкам НМЦК 2027 год": st.column_config.TextColumn("Сумма по заявкам НМЦК 2027 год"),
@@ -427,12 +455,14 @@ if not df.empty:
 
             conn.execute('''UPDATE purchases
                             SET subdivision=?, name=?, year_placement=?, ifo=?, okpd2=?, kosgu=?, basis=?,
-                                request_num=?, plan_graph_num=?, plan_2027=?, plan_2028=?, nmck_2027=?, nmck_2028=?,
+                                request_num=?, plan_graph_num=?, memo_num=?, memo_date=?,
+                                plan_2027=?, plan_2028=?, nmck_2027=?, nmck_2028=?,
                                 played_2027=?, played_2028=?, rem_2027=?, rem_2028=?
                             WHERE id = ?''',
                          (row["Подразделение"], updated_name, row["Год размещения"],
                           row["ИФО"], row["ОКПД2"], row["КОСГУ"], row["Основание"],
                           row["Номер предложения на закупку"], row["Номер план-графика"],
+                          row["Номер служебной записки на закупку"], row["Дата служебной записки на закупку"],
                           p27, p28, n27, n28, s27, s28, r27, r28, row["ID"]))
         conn.commit()
         conn.close()
