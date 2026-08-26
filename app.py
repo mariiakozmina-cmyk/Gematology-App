@@ -3,6 +3,8 @@ import pandas as pd
 import sqlite3
 import re
 import os
+import io
+import time
 from datetime import datetime
 
 st.set_page_config(layout="wide", page_title="Закупки НМИЦ")
@@ -159,12 +161,49 @@ def parse_float(val):
         return 0.0
 
 
-# --- БАЗА ДАННЫХ ---
+# --- БАЗА ДАННЫХ И АВТОБЭКАП ---
 DB_NAME = 'procurement_v10.db'
+BACKUP_DIR = 'auto_backups'
 
 
 def get_connection():
     return sqlite3.connect(DB_NAME)
+
+
+def create_hourly_auto_backup():
+    """Создает автоматическую копию базы данных раз в час в папку auto_backups"""
+    if not os.path.exists(DB_NAME):
+        return
+    if not os.path.exists(BACKUP_DIR):
+        os.makedirs(BACKUP_DIR)
+
+    now = time.time()
+    last_backup_file = os.path.join(BACKUP_DIR, "last_backup_timestamp.txt")
+
+    should_backup = False
+    if not os.path.exists(last_backup_file):
+        should_backup = True
+    else:
+        try:
+            with open(last_backup_file, "r") as f:
+                last_time = float(f.read().strip())
+            if now - last_time >= 3600:  # 3600 секунд = 1 час
+                should_backup = True
+        except Exception:
+            should_backup = True
+
+    if should_backup:
+        timestamp_str = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        backup_path = os.path.join(BACKUP_DIR, f"auto_backup_{timestamp_str}.db")
+        try:
+            with open(DB_NAME, "rb") as f_in:
+                data = f_in.read()
+            with open(backup_path, "wb") as f_out:
+                f_out.write(data)
+            with open(last_backup_file, "w") as f_ts:
+                f_ts.write(str(now))
+        except Exception:
+            pass
 
 
 def init_db():
@@ -369,6 +408,9 @@ def init_db():
     conn.commit()
     conn.close()
 
+    # Запуск регулярной проверки автобэкапа
+    create_hourly_auto_backup()
+
 
 init_db()
 
@@ -391,19 +433,19 @@ def get_all_ifo_sources():
 st.title("📋 Реестр закупок")
 
 # --- БЛОК 0: РЕЗЕРВНОЕ КОПИРОВАНИЕ И ВОССТАНОВЛЕНИЕ ---
-with st.expander("💾 Резервное копирование и восстановление базы данных", expanded=False):
+with st.expander("💾 Резервное копирование и автоматические сохранения", expanded=False):
     st.markdown(
-        "Здесь вы можете в 1 клик сохранить копию всех данных на свой компьютер или восстановить базу из сохраненного файла.")
+        "Система **автоматически делает бэкап вашей базы данных каждые 60 минут**. Вы также можете в любой момент сохранить файл себе на ПК.")
     bk_col1, bk_col2 = st.columns(2)
 
     with bk_col1:
-        st.markdown("**1. Скачать резервную копию:**")
+        st.markdown("**1. Ручное скачивание базы (.db):**")
         if os.path.exists(DB_NAME):
             with open(DB_NAME, "rb") as f:
                 db_bytes = f.read()
             today_str = datetime.now().strftime("%d_%m_%Y")
             st.download_button(
-                label="📥 Скачать резервную копию (procurement_v10.db)",
+                label="📥 Скачать копию базы данных (procurement_v10.db)",
                 data=db_bytes,
                 file_name=f"procurement_v10_backup_{today_str}.db",
                 mime="application/x-sqlite3",
@@ -422,9 +464,8 @@ with st.expander("💾 Резервное копирование и восста
                 st.success("База данных успешно восстановлена!")
                 st.rerun()
 
-# --- ФОРМА ВВОДА (БЕЗ st.form! ТЕПЕРЬ НАЖАТИЕ ENTER НЕ СОЗДАЕТ ЗАПИСЬ В БАЗУ) ---
+# --- ФОРМА ВВОДА ---
 with st.expander("➕ Добавить новую позицию", expanded=True):
-    # Используем счетчик в session_state для полного сброса полей только по нажатию кнопки
     if "new_entry_counter" not in st.session_state:
         st.session_state.new_entry_counter = 0
 
@@ -480,7 +521,6 @@ with st.expander("➕ Добавить новую позицию", expanded=True
             conn.commit()
             conn.close()
 
-            # Увеличиваем счетчик для чистой очистки формы
             st.session_state.new_entry_counter += 1
             st.success(f"Добавлено! Сохранено: {name_fixed}")
             st.rerun()
@@ -493,7 +533,6 @@ conn.close()
 if not df.empty:
     st.subheader("Главный реестр")
 
-    # Инициализация ключей фильтрации в session_state для СБРОСА ФИЛЬТРОВ
     if "flt_sub" not in st.session_state: st.session_state.flt_sub = "Все"
     if "flt_name" not in st.session_state: st.session_state.flt_name = ""
     if "flt_year" not in st.session_state: st.session_state.flt_year = "Все"
@@ -523,7 +562,6 @@ if not df.empty:
         filter_memo_date = f_col9.text_input("Поиск по дате служебной записки (в заявках, ДД-ММ-ГГГГ):",
                                              key="flt_memo_date")
 
-        # КНОПКА СБРОСА ФИЛЬТРОВ
         if st.button("🔄 Сбросить все фильтры"):
             st.session_state.flt_sub = "Все"
             st.session_state.flt_name = ""
@@ -538,7 +576,6 @@ if not df.empty:
 
     filtered_df = df.copy()
 
-    # Применение фильтров
     if filter_sub != "Все":
         filtered_df = filtered_df[filtered_df['subdivision'] == filter_sub]
     if filter_name.strip():
@@ -554,7 +591,6 @@ if not df.empty:
     if filter_basis != "Все":
         filtered_df = filtered_df[filtered_df['basis'] == filter_basis]
 
-    # Фильтрация по Номеру и Дате СЗ из заявок
     conn_filter = get_connection()
     if filter_memo_num.strip():
         matching_p_ids = [r[0] for r in conn_filter.execute(
@@ -568,16 +604,14 @@ if not df.empty:
         filtered_df = filtered_df[filtered_df['id'].isin(matching_p_ids)]
     conn_filter.close()
 
-    # 🔥 ДИНАМИЧЕСКИЙ ПЕРЕСЧЕТ СУММ В ТАБЛИЦЕ ЕСЛИ ВЫБРАН КОНКРЕТНЫЙ ИФО В ФИЛЬТРЕ 🔥
+    # Динамический пересчет сумм при выборе конкретного ИФО
     if filter_ifo != "Все" and filter_ifo.strip():
         selected_ifo_target = filter_ifo.strip()
         conn_ifo_calc = get_connection()
 
-        # Для каждой строки пересчитываем суммы СТРОГО по выбранному ИФО
         for idx_row, p_row in filtered_df.iterrows():
             p_id = p_row['id']
 
-            # Бюджет ИФО на 2027 и 2028
             b27 = conn_ifo_calc.execute(
                 "SELECT amount FROM budget_breakdown WHERE purchase_id=? AND year=2027 AND ifo_name=?",
                 (p_id, selected_ifo_target)).fetchone()
@@ -587,7 +621,6 @@ if not df.empty:
             p27_val = b27[0] if b27 else 0.0
             p28_val = b28[0] if b28 else 0.0
 
-            # НМЦК по активным заявкам для этого ИФО
             n27_res = conn_ifo_calc.execute("""
                                             SELECT SUM(t2.amount)
                                             FROM nmck_applications t1
@@ -621,8 +654,6 @@ if not df.empty:
             n27_val = n27_res[0] if (n27_res and n27_res[0] is not None) else 0.0
             n28_val = n28_res[0] if (n28_res and n28_res[0] is not None) else 0.0
 
-            # Сыгранная сумма (контракты/ДС) для этого ИФО
-            # Получаем все контракты за 2027 и 2028
             s27_val = 0.0
             cnts_27 = conn_ifo_calc.execute("SELECT id FROM contracts WHERE purchase_id=? AND year=2027",
                                             (p_id,)).fetchall()
@@ -651,8 +682,8 @@ if not df.empty:
                     s28_val += (ds_amt[0] if ds_amt else 0.0)
                 else:
                     c_amt = conn_ifo_calc.execute(
-                        "SELECT amount FROM contract_ifo_amounts WHERE contract_id=? AND ifo_source=?",
-                        (c_id, selected_ifo_target)).fetchone()
+                        "SELECT amount FROM contract_ifo_amounts WHERE contract_id=? AND ifo_source=?", (
+                            c_id, selected_ifo_target)).fetchone()
                     s28_val += (c_amt[0] if c_amt else 0.0)
 
             filtered_df.loc[idx_row, 'plan_2027'] = p27_val
@@ -676,27 +707,53 @@ if not df.empty:
         "Остаток 2027 год", "Остаток 2028 год"
     ]
 
-    # 🔥 ВЫБОР ОТОБРАЖАЕМЫХ КОЛОНОК ТАБЛИЦЫ 🔥
-    st.markdown("**👁️ Настройка видимости колонок таблицы:**")
-    selected_visible_columns = st.multiselect(
-        "Выберите, какие колонки показывать в таблице ниже:",
-        options=all_possible_columns,
-        default=all_possible_columns,
-        key="visible_cols_select"
-    )
+    # ВЫБОР ОТОБРАЖАЕМЫХ КОЛОНОК
+    col_v1, col_v2 = st.columns([3, 1])
+    with col_v1:
+        st.markdown("**👁️ Настройка видимости колонок таблицы:**")
+        selected_visible_columns = st.multiselect(
+            "Выберите, какие колонки показывать в таблице ниже:",
+            options=all_possible_columns,
+            default=all_possible_columns,
+            key="visible_cols_select"
+        )
 
-    display_df = filtered_df[[
+    # 📊 БЛОК ЭКСПОРТА В EXCEL 📊
+    export_df_raw = filtered_df[[
         "id", "subdivision", "name", "year_placement", "ifo",
         "okpd2", "kosgu", "basis", "request_num", "plan_graph_num",
         "plan_2027", "plan_2028", "nmck_2027", "nmck_2028",
         "played_2027", "played_2028", "rem_2027", "rem_2028"
     ]].copy()
+    export_df_raw.columns = all_possible_columns
 
-    for num_col in ["plan_2027", "plan_2028", "nmck_2027", "nmck_2028", "played_2027", "played_2028", "rem_2027",
-                    "rem_2028"]:
+    if selected_visible_columns:
+        export_df_final = export_df_raw[selected_visible_columns].copy()
+    else:
+        export_df_final = export_df_raw.copy()
+
+    # Генерация готового .xlsx файла в памяти
+    excel_buffer = io.BytesIO()
+    with pd.ExcelWriter(excel_buffer, engine='openpyxl') as writer:
+        export_df_final.to_excel(writer, index=False, sheet_name='Реестр закупок')
+    excel_buffer.seek(0)
+
+    with col_v2:
+        st.markdown("**📊 Экспорт отчета:**")
+        st.download_button(
+            label="📊 Скачать в Excel (.xlsx)",
+            data=excel_buffer,
+            file_name=f"reestr_zakupok_{datetime.now().strftime('%d_%m_%Y')}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            key="download_excel_btn"
+        )
+
+    display_df = export_df_raw.copy()
+    for num_col in ["Планируемая сумма; 2027 год", "Планируемая сумма; 2028 год",
+                    "Сумма по заявкам НМЦК 2027 год", "Сумма по заявкам НМЦК 2028 год",
+                    "Сумма сыгранная 2027 год", "Сумма сыгранная 2028 год",
+                    "Остаток 2027 год", "Остаток 2028 год"]:
         display_df[num_col] = display_df[num_col].apply(fmt_num)
-
-    display_df.columns = all_possible_columns
 
     if selected_visible_columns:
         display_df = display_df[selected_visible_columns]
@@ -732,7 +789,6 @@ if not df.empty:
                 continue
             p_id_val = row["ID"]
 
-            # Сохраняем значения только для колонок, которые были видимы и присутствуют в редакторе
             orig_row = df[df['id'] == p_id_val].iloc[0]
 
             upd_sub = row["Подразделение"] if "Подразделение" in row else orig_row["subdivision"]
@@ -787,7 +843,7 @@ if not df.empty:
         conn.close()
         st.success("Все изменения в базе сохранены!")
 
-    # --- БЛОК БЕЗОПАСНОГО УДАЛЕНИЯ ПОЗИЦИИ (ПЕРЕНЕСЕН СРАЗУ ПОД ТАБЛИЦУ) ---
+    # --- БЛОК БЕЗОПАСНОГО УДАЛЕНИЯ ПОЗИЦИИ ---
     with st.expander("🗑️ Удаление позиции из реестра", expanded=False):
         conn = get_connection()
         all_purchases_to_delete = conn.execute("SELECT id, name, subdivision FROM purchases").fetchall()
@@ -924,7 +980,6 @@ if not df.empty:
                     with st.container(border=True):
                         conn = get_connection()
 
-                        # Множество номеров 1С, по которым УЖЕ заключены контракты
                         contracted_1c_tuples = conn.execute(
                             "SELECT DISTINCT onec_num FROM contracts WHERE purchase_id=? AND year=? AND onec_num IS NOT NULL AND onec_num != ''",
                             (sel_id, year)).fetchall()
@@ -934,7 +989,6 @@ if not df.empty:
                             "SELECT id, onec_num, memo_num, memo_date FROM nmck_applications WHERE purchase_id=? AND year=?",
                             (sel_id, year)).fetchall()
 
-                        # Отфильтровываем только АКТИВНЫЕ (еще не сыгранные в контракт) заявки
                         active_applications = [app for app in applications if app[1] not in contracted_1c_set]
 
                         total_nmck_year = 0.0
@@ -1009,7 +1063,6 @@ if not df.empty:
                                         st.rerun()
 
                                     if st.session_state.get(f"editing_nmck_{app_id}", False):
-                                        # Редактирование без st.form для надежности
                                         e_onec = st.text_input("Изменить Номер 1С", value=onec_val if onec_val else "",
                                                                key=f"e_onec_in_{app_id}")
                                         e_memo_num = st.text_input("Изменить Номер служебной записки",
