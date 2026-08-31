@@ -2,84 +2,22 @@ import streamlit as st
 import pandas as pd
 import sqlite3
 import re
-import os
 import io
-import time
 from datetime import datetime
+import openpyxl
+from openpyxl.styles import Border, Side, Alignment, Font, PatternFill
 
 st.set_page_config(layout="wide", page_title="Закупки НМИЦ")
 
-# --- CSS СТИЛИ: Центрирование и аккуратная контрастность ---
+# --- CSS СТИЛИ: Принудительное центрирование Главного реестра ---
 st.markdown("""
 <style>
-/* Центрирование заголовков и содержимого ячеек таблицы Streamlit */
-div[data-testid="stDataEditor"] *, 
-div[data-testid="stDataFrame"] * {
+[data-testid="stDataEditor"] *, 
+[data-testid="stDataFrame"] *,
+div[data-testid="stDataEditor"] div,
+div[data-testid="stDataFrame"] div {
     text-align: center !important;
-}
-div[data-testid="stDataEditor"] th, 
-div[data-testid="stDataFrame"] th {
-    text-align: center !important;
-}
-div[data-testid="stDataEditor"] td, 
-div[data-testid="stDataFrame"] td {
-    text-align: center !important;
-}
-div[data-testid="stDataEditor"] input {
-    text-align: center !important;
-}
-
-/* Стили подсветок и плашек для улучшения читаемости */
-.badge-1c {
-    background-color: #e0f2fe;
-    color: #0369a1;
-    padding: 3px 10px;
-    border-radius: 6px;
-    font-weight: 700;
-    font-size: 14px;
-    display: inline-block;
-    border: 1px solid #bae6fd;
-}
-
-.badge-contract {
-    background-color: #f1f5f9;
-    color: #1e293b;
-    padding: 3px 10px;
-    border-radius: 6px;
-    font-weight: 700;
-    font-size: 14px;
-    display: inline-block;
-    border: 1px solid #cbd5e1;
-}
-
-.badge-ds {
-    background-color: #fef3c7;
-    color: #92400e;
-    padding: 2px 8px;
-    border-radius: 5px;
-    font-weight: 700;
-    font-size: 13px;
-    display: inline-block;
-    border: 1px solid #fde68a;
-}
-
-.rem-header {
-    color: #047857;
-    font-weight: 700;
-    font-size: 14px;
-    margin-top: 10px;
-    margin-bottom: 4px;
-    display: block;
-}
-
-.total-summary {
-    background-color: #f8fafc;
-    border-left: 4px solid #0284c7;
-    padding: 8px 12px;
-    border-radius: 4px;
-    font-weight: 700;
-    color: #0f172a;
-    margin-top: 8px;
+    justify-content: center !important;
 }
 </style>
 """, unsafe_allow_html=True)
@@ -114,8 +52,7 @@ SUBDIVISIONS = [
     "Универсальные коды"
 ]
 
-KOSGU_LIST = ["221", "222", "223", "224", "225", "226", "227", "228", "310", "341", "342", "343", "344", "345", "346",
-              "349"]
+KOSGU_LIST = ["221", "222", "223", "224", "225", "226", "227", "228", "310", "341", "342", "343", "344", "345", "346", "349"]
 
 BASIS_LIST = ["п. 4 44-ФЗ", "п. 9 44-ФЗ", "п. 28 44-ФЗ", "44-ФЗ", "223-ФЗ"]
 
@@ -123,9 +60,7 @@ BASIS_LIST = ["п. 4 44-ФЗ", "п. 9 44-ФЗ", "п. 28 44-ФЗ", "44-ФЗ", "22
 # --- ФУНКЦИИ ФОРМАТИРОВАНИЯ ---
 def format_okpd(raw_text):
     """Добавляет точки через каждые 2 цифры"""
-    if not raw_text:
-        return ""
-    clean = re.sub(r'\D', '', str(raw_text))
+    clean = re.sub(r'\D', '', raw_text)
     return ".".join(clean[i:i + 2] for i in range(0, len(clean), 2))
 
 
@@ -140,18 +75,21 @@ def capitalize_first_letter(text):
 
 
 def fmt_num(val):
-    """Форматирует число с разделением тысяч ПРОБЕЛОМ и ВСЕГДА показывает копейки (,00)"""
+    """Форматирует число с разделением тысяч ПРОБЕЛОМ"""
     if val is None or pd.isna(val):
-        return "0,00"
+        return "0"
     try:
         val_float = float(val)
-        return f"{val_float:,.2f}".replace(",", " ").replace(".", ",")
+        if val_float.is_integer():
+            return f"{int(val_float):,}".replace(",", " ")
+        else:
+            return f"{val_float:,.2f}".replace(",", " ")
     except (ValueError, TypeError):
         return str(val)
 
 
 def parse_float(val):
-    """Безопасный перевод строки с пробелами и запятыми в число float"""
+    """Безопасный перевод строки с пробелами в число float"""
     if val is None or pd.isna(val):
         return 0.0
     s = str(val).replace(" ", "").replace(",", ".")
@@ -161,49 +99,69 @@ def parse_float(val):
         return 0.0
 
 
-# --- БАЗА ДАННЫХ И АВТОБЭКАП ---
-DB_NAME = 'procurement_v10.db'
-BACKUP_DIR = 'auto_backups'
+# --- ВЫГРУЗКА В EXCEL С РАСЧЕРЧЕННЫМИ ПОЛЯМИ И СЕТКОЙ ---
+def generate_excel_with_borders(df_to_export):
+    output = io.BytesIO()
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Реестр закупок"
+
+    # Принудительно включаем отображение сетки
+    ws.views.sheetView[0].showGridLines = True
+
+    # Тонкая рамка для всех ячеек
+    thin_border = Border(
+        left=Side(style='thin', color='A0A0A0'),
+        right=Side(style='thin', color='A0A0A0'),
+        top=Side(style='thin', color='A0A0A0'),
+        bottom=Side(style='thin', color='A0A0A0')
+    )
+
+    header_fill = PatternFill(start_color='1F4E78', end_color='1F4E78', fill_type='solid')
+    header_font = Font(name='Calibri', size=11, bold=True, color='FFFFFF')
+
+    # Шапка
+    headers = list(df_to_export.columns)
+    ws.append(headers)
+
+    for col_num in range(1, len(headers) + 1):
+        cell = ws.cell(row=1, column=col_num)
+        cell.fill = header_fill
+        cell.font = header_font
+        cell.alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
+        cell.border = thin_border
+
+    # Данные
+    for row_idx, row_data in enumerate(df_to_export.values, start=2):
+        formatted_row = []
+        for val in row_data:
+            if isinstance(val, list):
+                formatted_row.append(", ".join(val))
+            else:
+                formatted_row.append(val)
+
+        ws.append(formatted_row)
+
+        for col_num in range(1, len(headers) + 1):
+            cell = ws.cell(row=row_idx, column=col_num)
+            cell.border = thin_border
+            cell.alignment = Alignment(horizontal='center', vertical='center')
+            cell.font = Font(name='Calibri', size=10)
+
+    # Ширина колонок
+    for col in ws.columns:
+        max_len = max(len(str(cell.value or '')) for cell in col)
+        col_letter = openpyxl.utils.get_column_letter(col[0].column)
+        ws.column_dimensions[col_letter].width = max(max_len + 3, 14)
+
+    wb.save(output)
+    output.seek(0)
+    return output.getvalue()
 
 
+# --- БАЗА ДАННЫХ ---
 def get_connection():
-    return sqlite3.connect(DB_NAME)
-
-
-def create_hourly_auto_backup():
-    """Создает автоматическую копию базы данных раз в час в папку auto_backups"""
-    if not os.path.exists(DB_NAME):
-        return
-    if not os.path.exists(BACKUP_DIR):
-        os.makedirs(BACKUP_DIR)
-
-    now = time.time()
-    last_backup_file = os.path.join(BACKUP_DIR, "last_backup_timestamp.txt")
-
-    should_backup = False
-    if not os.path.exists(last_backup_file):
-        should_backup = True
-    else:
-        try:
-            with open(last_backup_file, "r") as f:
-                last_time = float(f.read().strip())
-            if now - last_time >= 3600:  # 3600 секунд = 1 час
-                should_backup = True
-        except Exception:
-            should_backup = True
-
-    if should_backup:
-        timestamp_str = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-        backup_path = os.path.join(BACKUP_DIR, f"auto_backup_{timestamp_str}.db")
-        try:
-            with open(DB_NAME, "rb") as f_in:
-                data = f_in.read()
-            with open(backup_path, "wb") as f_out:
-                f_out.write(data)
-            with open(last_backup_file, "w") as f_ts:
-                f_ts.write(str(now))
-        except Exception:
-            pass
+    return sqlite3.connect('procurement_v10.db')
 
 
 def init_db():
@@ -212,204 +170,94 @@ def init_db():
 
     c.execute('''CREATE TABLE IF NOT EXISTS purchases
                  (
-                     id
-                     INTEGER
-                     PRIMARY
-                     KEY
-                     AUTOINCREMENT,
-                     subdivision
-                     TEXT,
-                     name
-                     TEXT,
-                     year_placement
-                     INTEGER,
-                     ifo
-                     TEXT,
-                     okpd2
-                     TEXT,
-                     kosgu
-                     TEXT,
-                     basis
-                     TEXT,
-                     request_num
-                     TEXT,
-                     plan_graph_num
-                     TEXT,
-                     plan_2027
-                     REAL
-                     DEFAULT
-                     0,
-                     plan_2028
-                     REAL
-                     DEFAULT
-                     0,
-                     nmck_2027
-                     REAL
-                     DEFAULT
-                     0,
-                     nmck_2028
-                     REAL
-                     DEFAULT
-                     0,
-                     played_2027
-                     REAL
-                     DEFAULT
-                     0,
-                     played_2028
-                     REAL
-                     DEFAULT
-                     0,
-                     rem_2027
-                     REAL
-                     DEFAULT
-                     0,
-                     rem_2028
-                     REAL
-                     DEFAULT
-                     0
+                     id INTEGER PRIMARY KEY AUTOINCREMENT,
+                     subdivision TEXT,
+                     name TEXT,
+                     year_placement INTEGER,
+                     ifo TEXT,
+                     okpd2 TEXT,
+                     kosgu TEXT,
+                     basis TEXT,
+                     request_num TEXT,
+                     plan_graph_num TEXT,
+                     plan_2027 REAL DEFAULT 0,
+                     plan_2028 REAL DEFAULT 0,
+                     nmck_2027 REAL DEFAULT 0,
+                     nmck_2028 REAL DEFAULT 0,
+                     played_2027 REAL DEFAULT 0,
+                     played_2028 REAL DEFAULT 0,
+                     rem_2027 REAL DEFAULT 0,
+                     rem_2028 REAL DEFAULT 0
                  )''')
 
     c.execute('''CREATE TABLE IF NOT EXISTS budget_breakdown
                  (
-                     purchase_id
-                     INTEGER,
-                     year
-                     INTEGER,
-                     ifo_name
-                     TEXT,
-                     amount
-                     REAL
+                     purchase_id INTEGER,
+                     year INTEGER,
+                     ifo_name TEXT,
+                     amount REAL
                  )''')
 
     c.execute('''CREATE TABLE IF NOT EXISTS nmck_applications
                  (
-                     id
-                     INTEGER
-                     PRIMARY
-                     KEY
-                     AUTOINCREMENT,
-                     purchase_id
-                     INTEGER,
-                     year
-                     INTEGER,
-                     onec_num
-                     TEXT,
-                     memo_num
-                     TEXT
-                     DEFAULT
-                     '',
-                     memo_date
-                     TEXT
-                     DEFAULT
-                     ''
+                     id INTEGER PRIMARY KEY AUTOINCREMENT,
+                     purchase_id INTEGER,
+                     year INTEGER,
+                     onec_num TEXT
                  )''')
-
-    for col in ["memo_num", "memo_date"]:
-        try:
-            c.execute(f"ALTER TABLE nmck_applications ADD COLUMN {col} TEXT DEFAULT ''")
-        except sqlite3.OperationalError:
-            pass
 
     c.execute('''CREATE TABLE IF NOT EXISTS nmck_app_ifo_amounts
                  (
-                     id
-                     INTEGER
-                     PRIMARY
-                     KEY
-                     AUTOINCREMENT,
-                     app_id
-                     INTEGER,
-                     ifo_source
-                     TEXT,
-                     amount
-                     REAL
+                     id INTEGER PRIMARY KEY AUTOINCREMENT,
+                     app_id INTEGER,
+                     ifo_source TEXT,
+                     amount REAL
                  )''')
 
     c.execute('''CREATE TABLE IF NOT EXISTS contracts
                  (
-                     id
-                     INTEGER
-                     PRIMARY
-                     KEY
-                     AUTOINCREMENT,
-                     purchase_id
-                     INTEGER,
-                     year
-                     INTEGER,
-                     contract_num
-                     TEXT,
-                     onec_num
-                     TEXT,
-                     contract_date
-                     TEXT,
-                     comment
-                     TEXT
+                     id INTEGER PRIMARY KEY AUTOINCREMENT,
+                     purchase_id INTEGER,
+                     year INTEGER,
+                     contract_num TEXT,
+                     onec_num TEXT,
+                     contract_date TEXT,
+                     comment TEXT
                  )''')
 
     c.execute('''CREATE TABLE IF NOT EXISTS contract_ifo_amounts
                  (
-                     id
-                     INTEGER
-                     PRIMARY
-                     KEY
-                     AUTOINCREMENT,
-                     contract_id
-                     INTEGER,
-                     ifo_source
-                     TEXT,
-                     amount
-                     REAL
+                     id INTEGER PRIMARY KEY AUTOINCREMENT,
+                     contract_id INTEGER,
+                     ifo_source TEXT,
+                     amount REAL
                  )''')
 
     c.execute('''CREATE TABLE IF NOT EXISTS ds_agreements
                  (
-                     id
-                     INTEGER
-                     PRIMARY
-                     KEY
-                     AUTOINCREMENT,
-                     contract_id
-                     INTEGER,
-                     ds_num
-                     TEXT,
-                     ds_date
-                     TEXT,
-                     comment
-                     TEXT
+                     id INTEGER PRIMARY KEY AUTOINCREMENT,
+                     contract_id INTEGER,
+                     ds_num TEXT,
+                     ds_date TEXT,
+                     comment TEXT
                  )''')
 
     c.execute('''CREATE TABLE IF NOT EXISTS ds_ifo_amounts
                  (
-                     id
-                     INTEGER
-                     PRIMARY
-                     KEY
-                     AUTOINCREMENT,
-                     ds_id
-                     INTEGER,
-                     ifo_source
-                     TEXT,
-                     amount
-                     REAL
+                     id INTEGER PRIMARY KEY AUTOINCREMENT,
+                     ds_id INTEGER,
+                     ifo_source TEXT,
+                     amount REAL
                  )''')
 
     c.execute('''CREATE TABLE IF NOT EXISTS funding_sources
                  (
-                     id
-                     INTEGER
-                     PRIMARY
-                     KEY
-                     AUTOINCREMENT,
-                     source_name
-                     TEXT
-                     UNIQUE
+                     id INTEGER PRIMARY KEY AUTOINCREMENT,
+                     source_name TEXT UNIQUE
                  )''')
 
     conn.commit()
     conn.close()
-
-    # Запуск регулярной проверки автобэкапа
-    create_hourly_auto_backup()
 
 
 init_db()
@@ -432,100 +280,61 @@ def get_all_ifo_sources():
 
 st.title("📋 Реестр закупок")
 
-# --- БЛОК 0: РЕЗЕРВНОЕ КОПИРОВАНИЕ И ВОССТАНОВЛЕНИЕ ---
-with st.expander("💾 Резервное копирование и автоматические сохранения", expanded=False):
-    st.markdown(
-        "Система **автоматически делает бэкап вашей базы данных каждые 60 минут**. Вы также можете в любой момент сохранить файл себе на ПК.")
-    bk_col1, bk_col2 = st.columns(2)
-
-    with bk_col1:
-        st.markdown("**1. Ручное скачивание базы (.db):**")
-        if os.path.exists(DB_NAME):
-            with open(DB_NAME, "rb") as f:
-                db_bytes = f.read()
-            today_str = datetime.now().strftime("%d_%m_%Y")
-            st.download_button(
-                label="📥 Скачать копию базы данных (procurement_v10.db)",
-                data=db_bytes,
-                file_name=f"procurement_v10_backup_{today_str}.db",
-                mime="application/x-sqlite3",
-                key="download_db_btn"
-            )
-        else:
-            st.info("База данных пока пуста.")
-
-    with bk_col2:
-        st.markdown("**2. Восстановить базу из файла:**")
-        uploaded_db = st.file_uploader("Выберите сохраненный файл .db", type=["db"], key="restore_db_uploader")
-        if uploaded_db is not None:
-            if st.button("⚠️ Заменить текущую базу этим файлом"):
-                with open(DB_NAME, "wb") as f:
-                    f.write(uploaded_db.getbuffer())
-                st.success("База данных успешно восстановлена!")
-                st.rerun()
-
 # --- ФОРМА ВВОДА ---
 with st.expander("➕ Добавить новую позицию", expanded=True):
-    if "new_entry_counter" not in st.session_state:
-        st.session_state.new_entry_counter = 0
+    with st.form("new_entry", clear_on_submit=True):
+        row1 = st.columns([2, 3, 1, 2])
+        sub = row1[0].selectbox("Подразделение", SUBDIVISIONS)
+        name = row1[1].text_input("Наименование")
+        y_place = row1[2].selectbox("Год размещения", list(range(2027, 2032)))
 
-    cnt_k = st.session_state.new_entry_counter
+        available_ifo = get_all_ifo_sources()
+        ifo_main_selected = row1[3].multiselect("ИФО (источники)", available_ifo, default=[])
 
-    row1 = st.columns([2, 3, 1, 2])
-    sub = row1[0].selectbox("Подразделение", SUBDIVISIONS, key=f"ne_sub_{cnt_k}")
-    name = row1[1].text_input("Наименование", key=f"ne_name_{cnt_k}")
-    y_place = row1[2].selectbox("Год размещения", list(range(2027, 2032)), key=f"ne_yplace_{cnt_k}")
+        custom_ifo_input = st.text_input("Если выбрали 'Прочее', укажите название нового источника ИФО:")
 
-    available_ifo = get_all_ifo_sources()
-    ifo_main_selected = row1[3].multiselect("ИФО (источники)", available_ifo, default=[], key=f"ne_ifo_{cnt_k}")
+        row2 = st.columns([2, 1, 1])
+        okpd_raw = row2[0].text_input("ОКПД2 (вводите цифры)", placeholder="Напр: 123456")
+        kosgu = row2[1].selectbox("КОСГУ", KOSGU_LIST)
+        basis = row2[2].selectbox("Основание", BASIS_LIST)
 
-    custom_ifo_input = st.text_input("Если выбрали 'Прочее', укажите название нового источника ИФО:",
-                                     key=f"ne_custom_ifo_{cnt_k}")
+        row3 = st.columns(2)
+        req_n = row3[0].text_input("Номер предложения на закупку")
+        graph_n = row3[1].text_input("Номер план-графика")
 
-    row2 = st.columns([2, 1, 1])
-    okpd_raw = row2[0].text_input("ОКПД2 (вводите цифры)", placeholder="Напр: 123456", key=f"ne_okpd_{cnt_k}")
-    kosgu = row2[1].selectbox("КОСГУ", KOSGU_LIST, key=f"ne_kosgu_{cnt_k}")
-    basis = row2[2].selectbox("Основание", BASIS_LIST, key=f"ne_basis_{cnt_k}")
+        submit_btn = st.form_submit_button("Сохранить позицию")
 
-    row3 = st.columns(2)
-    req_n = row3[0].text_input("Номер предложения на закупку", key=f"ne_reqn_{cnt_k}")
-    graph_n = row3[1].text_input("Номер план-графика", key=f"ne_graphn_{cnt_k}")
+        if submit_btn:
+            if not name or not name.strip():
+                st.warning("⚠️ Пожалуйста, введите Наименование закупки перед сохранением!")
+            else:
+                final_ifo_list = [s for s in ifo_main_selected if s != "Прочее"]
+                if "Прочее" in ifo_main_selected and custom_ifo_input.strip():
+                    new_src = custom_ifo_input.strip()
+                    conn = get_connection()
+                    try:
+                        conn.execute("INSERT INTO funding_sources (source_name) VALUES (?)", (new_src,))
+                        conn.commit()
+                    except sqlite3.IntegrityError:
+                        pass
+                    conn.close()
+                    if new_src not in final_ifo_list:
+                        final_ifo_list.append(new_src)
 
-    if st.button("💾 Сохранить позицию", key=f"ne_submit_btn_{cnt_k}"):
-        if not name or not name.strip():
-            st.warning("⚠️ Пожалуйста, введите Наименование закупки перед сохранением!")
-        else:
-            final_ifo_list = [s for s in ifo_main_selected if s != "Прочее"]
-            if "Прочее" in ifo_main_selected and custom_ifo_input.strip():
-                new_src = custom_ifo_input.strip()
+                okpd_fixed = format_okpd(okpd_raw)
+                name_fixed = capitalize_first_letter(name)
                 conn = get_connection()
-                try:
-                    conn.execute("INSERT INTO funding_sources (source_name) VALUES (?)", (new_src,))
-                    conn.commit()
-                except sqlite3.IntegrityError:
-                    pass
+                conn.execute('''INSERT INTO purchases
+                                (subdivision, name, year_placement, ifo, okpd2, kosgu, basis, request_num, plan_graph_num,
+                                 plan_2027, plan_2028, nmck_2027, nmck_2028, played_2027, played_2028, rem_2027, rem_2028)
+                                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 0, 0, 0, 0, 0, 0)''',
+                             (sub, name_fixed, y_place, ", ".join(final_ifo_list), okpd_fixed, kosgu, basis, req_n, graph_n))
+                conn.commit()
                 conn.close()
-                if new_src not in final_ifo_list:
-                    final_ifo_list.append(new_src)
+                st.success(f"Добавлено! Сохранено: {name_fixed}")
+                st.rerun()
 
-            okpd_fixed = format_okpd(okpd_raw)
-            name_fixed = capitalize_first_letter(name)
-
-            conn = get_connection()
-            conn.execute('''INSERT INTO purchases
-                            (subdivision, name, year_placement, ifo, okpd2, kosgu, basis, request_num, plan_graph_num,
-                             plan_2027, plan_2028, nmck_2027, nmck_2028, played_2027, played_2028, rem_2027, rem_2028)
-                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 0, 0, 0, 0, 0, 0)''',
-                         (sub, name_fixed, y_place, ", ".join(final_ifo_list), okpd_fixed, kosgu, basis, req_n,
-                          graph_n))
-            conn.commit()
-            conn.close()
-
-            st.session_state.new_entry_counter += 1
-            st.success(f"Добавлено! Сохранено: {name_fixed}")
-            st.rerun()
-
-# --- ОСНОВНАЯ ТАБЛИЦА И ФИЛЬТРЫ ---
+# --- ОСНОВНАЯ ТАБЛИЦА ---
 conn = get_connection()
 df = pd.read_sql_query("SELECT * FROM purchases", conn)
 conn.close()
@@ -533,56 +342,26 @@ conn.close()
 if not df.empty:
     st.subheader("Главный реестр")
 
-    if "flt_sub" not in st.session_state: st.session_state.flt_sub = "Все"
-    if "flt_name" not in st.session_state: st.session_state.flt_name = ""
-    if "flt_year" not in st.session_state: st.session_state.flt_year = "Все"
-    if "flt_ifo" not in st.session_state: st.session_state.flt_ifo = "Все"
-    if "flt_okpd" not in st.session_state: st.session_state.flt_okpd = ""
-    if "flt_kosgu" not in st.session_state: st.session_state.flt_kosgu = "Все"
-    if "flt_basis" not in st.session_state: st.session_state.flt_basis = "Все"
-    if "flt_memo_num" not in st.session_state: st.session_state.flt_memo_num = ""
-    if "flt_memo_date" not in st.session_state: st.session_state.flt_memo_date = ""
-
-    all_ifo_options = ["Все"] + get_all_ifo_sources()
-
     with st.expander("🔎 Фильтры реестра (нажмите чтобы открыть/скрыть)", expanded=False):
         f_col1, f_col2, f_col3, f_col4 = st.columns(4)
-        filter_sub = f_col1.selectbox("Подразделение:", ["Все"] + SUBDIVISIONS, key="flt_sub")
-        filter_name = f_col2.text_input("Поиск по наименованию:", key="flt_name")
-        filter_year = f_col3.selectbox("Год размещения:", ["Все"] + list(df['year_placement'].unique()), key="flt_year")
-        filter_ifo = f_col4.selectbox("Поиск по ИФО (выбор источника):", options=all_ifo_options, key="flt_ifo")
+        filter_sub = f_col1.selectbox("Подразделение:", ["Все"] + SUBDIVISIONS)
+        filter_name = f_col2.text_input("Поиск по наименованию:")
+        filter_year = f_col3.selectbox("Год размещения:", ["Все"] + list(df['year_placement'].unique()))
+        filter_ifo = f_col4.text_input("Поиск по ИФО:")
 
         f_col5, f_col6, f_col7 = st.columns(3)
-        filter_okpd = f_col5.text_input("Поиск по ОКПД2:", key="flt_okpd")
-        filter_kosgu = f_col6.selectbox("КОСГУ:", ["Все"] + KOSGU_LIST, key="flt_kosgu")
-        filter_basis = f_col7.selectbox("Основание:", ["Все"] + BASIS_LIST, key="flt_basis")
-
-        f_col8, f_col9 = st.columns(2)
-        filter_memo_num = f_col8.text_input("Поиск по номеру служебной записки (в заявках):", key="flt_memo_num")
-        filter_memo_date = f_col9.text_input("Поиск по дате служебной записки (в заявках, ДД-ММ-ГГГГ):",
-                                             key="flt_memo_date")
-
-        if st.button("🔄 Сбросить все фильтры"):
-            st.session_state.flt_sub = "Все"
-            st.session_state.flt_name = ""
-            st.session_state.flt_year = "Все"
-            st.session_state.flt_ifo = "Все"
-            st.session_state.flt_okpd = ""
-            st.session_state.flt_kosgu = "Все"
-            st.session_state.flt_basis = "Все"
-            st.session_state.flt_memo_num = ""
-            st.session_state.flt_memo_date = ""
-            st.rerun()
+        filter_okpd = f_col5.text_input("Поиск по ОКПД2:")
+        filter_kosgu = f_col6.selectbox("КОСГУ:", ["Все"] + KOSGU_LIST)
+        filter_basis = f_col7.selectbox("Основание:", ["Все"] + BASIS_LIST)
 
     filtered_df = df.copy()
-
     if filter_sub != "Все":
         filtered_df = filtered_df[filtered_df['subdivision'] == filter_sub]
     if filter_name.strip():
         filtered_df = filtered_df[filtered_df['name'].str.contains(filter_name.strip(), case=False, na=False)]
     if filter_year != "Все":
         filtered_df = filtered_df[filtered_df['year_placement'] == int(filter_year)]
-    if filter_ifo != "Все" and filter_ifo.strip():
+    if filter_ifo.strip():
         filtered_df = filtered_df[filtered_df['ifo'].str.contains(filter_ifo.strip(), case=False, na=False)]
     if filter_okpd.strip():
         filtered_df = filtered_df[filtered_df['okpd2'].str.contains(filter_okpd.strip(), case=False, na=False)]
@@ -591,114 +370,23 @@ if not df.empty:
     if filter_basis != "Все":
         filtered_df = filtered_df[filtered_df['basis'] == filter_basis]
 
-    conn_filter = get_connection()
-    if filter_memo_num.strip():
-        matching_p_ids = [r[0] for r in conn_filter.execute(
-            "SELECT DISTINCT purchase_id FROM nmck_applications WHERE memo_num LIKE ?",
-            (f"%{filter_memo_num.strip()}%",)).fetchall()]
-        filtered_df = filtered_df[filtered_df['id'].isin(matching_p_ids)]
-    if filter_memo_date.strip():
-        matching_p_ids = [r[0] for r in conn_filter.execute(
-            "SELECT DISTINCT purchase_id FROM nmck_applications WHERE memo_date LIKE ?",
-            (f"%{filter_memo_date.strip()}%",)).fetchall()]
-        filtered_df = filtered_df[filtered_df['id'].isin(matching_p_ids)]
-    conn_filter.close()
-
-    # Динамический пересчет сумм при выборе конкретного ИФО
-    if filter_ifo != "Все" and filter_ifo.strip():
-        selected_ifo_target = filter_ifo.strip()
-        conn_ifo_calc = get_connection()
-
-        for idx_row, p_row in filtered_df.iterrows():
-            p_id = p_row['id']
-
-            b27 = conn_ifo_calc.execute(
-                "SELECT amount FROM budget_breakdown WHERE purchase_id=? AND year=2027 AND ifo_name=?",
-                (p_id, selected_ifo_target)).fetchone()
-            b28 = conn_ifo_calc.execute(
-                "SELECT amount FROM budget_breakdown WHERE purchase_id=? AND year=2028 AND ifo_name=?",
-                (p_id, selected_ifo_target)).fetchone()
-            p27_val = b27[0] if b27 else 0.0
-            p28_val = b28[0] if b28 else 0.0
-
-            n27_res = conn_ifo_calc.execute("""
-                                            SELECT SUM(t2.amount)
-                                            FROM nmck_applications t1
-                                                     JOIN nmck_app_ifo_amounts t2 ON t1.id = t2.app_id
-                                            WHERE t1.purchase_id = ?
-                                              AND t1.year = 2027
-                                              AND t2.ifo_source = ?
-                                              AND (t1.onec_num IS NULL OR t1.onec_num = '' OR t1.onec_num NOT IN
-                                                                                              (SELECT DISTINCT onec_num
-                                                                                               FROM contracts
-                                                                                               WHERE purchase_id = ? AND year = 2027
-                                                                                                 AND onec_num IS NOT NULL
-                                                                                                 AND onec_num != ''
-                                                )
-                                                )""", (p_id, selected_ifo_target, p_id)).fetchone()
-            n28_res = conn_ifo_calc.execute("""
-                                            SELECT SUM(t2.amount)
-                                            FROM nmck_applications t1
-                                                     JOIN nmck_app_ifo_amounts t2 ON t1.id = t2.app_id
-                                            WHERE t1.purchase_id = ?
-                                              AND t1.year = 2028
-                                              AND t2.ifo_source = ?
-                                              AND (t1.onec_num IS NULL OR t1.onec_num = '' OR t1.onec_num NOT IN
-                                                                                              (SELECT DISTINCT onec_num
-                                                                                               FROM contracts
-                                                                                               WHERE purchase_id = ? AND year = 2028
-                                                                                                 AND onec_num IS NOT NULL
-                                                                                                 AND onec_num != ''
-                                                )
-                                                )""", (p_id, selected_ifo_target, p_id)).fetchone()
-            n27_val = n27_res[0] if (n27_res and n27_res[0] is not None) else 0.0
-            n28_val = n28_res[0] if (n28_res and n28_res[0] is not None) else 0.0
-
-            s27_val = 0.0
-            cnts_27 = conn_ifo_calc.execute("SELECT id FROM contracts WHERE purchase_id=? AND year=2027",
-                                            (p_id,)).fetchall()
-            for (c_id,) in cnts_27:
-                last_ds = conn_ifo_calc.execute(
-                    "SELECT id FROM ds_agreements WHERE contract_id=? ORDER BY id DESC LIMIT 1", (c_id,)).fetchone()
-                if last_ds:
-                    ds_amt = conn_ifo_calc.execute("SELECT amount FROM ds_ifo_amounts WHERE ds_id=? AND ifo_source=?",
-                                                   (last_ds[0], selected_ifo_target)).fetchone()
-                    s27_val += (ds_amt[0] if ds_amt else 0.0)
-                else:
-                    c_amt = conn_ifo_calc.execute(
-                        "SELECT amount FROM contract_ifo_amounts WHERE contract_id=? AND ifo_source=?",
-                        (c_id, selected_ifo_target)).fetchone()
-                    s27_val += (c_amt[0] if c_amt else 0.0)
-
-            s28_val = 0.0
-            cnts_28 = conn_ifo_calc.execute("SELECT id FROM contracts WHERE purchase_id=? AND year=2028",
-                                            (p_id,)).fetchall()
-            for (c_id,) in cnts_28:
-                last_ds = conn_ifo_calc.execute(
-                    "SELECT id FROM ds_agreements WHERE contract_id=? ORDER BY id DESC LIMIT 1", (c_id,)).fetchone()
-                if last_ds:
-                    ds_amt = conn_ifo_calc.execute("SELECT amount FROM ds_ifo_amounts WHERE ds_id=? AND ifo_source=?",
-                                                   (last_ds[0], selected_ifo_target)).fetchone()
-                    s28_val += (ds_amt[0] if ds_amt else 0.0)
-                else:
-                    c_amt = conn_ifo_calc.execute(
-                        "SELECT amount FROM contract_ifo_amounts WHERE contract_id=? AND ifo_source=?", (
-                            c_id, selected_ifo_target)).fetchone()
-                    s28_val += (c_amt[0] if c_amt else 0.0)
-
-            filtered_df.loc[idx_row, 'plan_2027'] = p27_val
-            filtered_df.loc[idx_row, 'plan_2028'] = p28_val
-            filtered_df.loc[idx_row, 'nmck_2027'] = n27_val
-            filtered_df.loc[idx_row, 'nmck_2028'] = n28_val
-            filtered_df.loc[idx_row, 'played_2027'] = s27_val
-            filtered_df.loc[idx_row, 'played_2028'] = s28_val
-
-        conn_ifo_calc.close()
-
     filtered_df['rem_2027'] = filtered_df['plan_2027'] - filtered_df['nmck_2027'] - filtered_df['played_2027']
     filtered_df['rem_2028'] = filtered_df['plan_2028'] - filtered_df['nmck_2028'] - filtered_df['played_2028']
 
-    all_possible_columns = [
+    display_df = filtered_df[[
+        "id", "subdivision", "name", "year_placement", "ifo",
+        "okpd2", "kosgu", "basis", "request_num", "plan_graph_num",
+        "plan_2027", "plan_2028", "nmck_2027", "nmck_2028",
+        "played_2027", "played_2028", "rem_2027", "rem_2028"
+    ]].copy()
+
+    # Преобразуем ИФО в список для поддержки Multiselect в редакторе таблицы
+    display_df['ifo'] = display_df['ifo'].apply(lambda x: [s.strip() for s in str(x).split(",") if s.strip()] if x else [])
+
+    for num_col in ["plan_2027", "plan_2028", "nmck_2027", "nmck_2028", "played_2027", "played_2028", "rem_2027", "rem_2028"]:
+        display_df[num_col] = display_df[num_col].apply(fmt_num)
+
+    display_df.columns = [
         "ID", "Подразделение", "Наименование", "Год размещения", "ИФО",
         "ОКПД2", "КОСГУ", "Основание", "Номер предложения на закупку", "Номер план-графика",
         "Планируемая сумма; 2027 год", "Планируемая сумма; 2028 год",
@@ -707,63 +395,16 @@ if not df.empty:
         "Остаток 2027 год", "Остаток 2028 год"
     ]
 
-    # ВЫБОР ОТОБРАЖАЕМЫХ КОЛОНОК
-    col_v1, col_v2 = st.columns([3, 1])
-    with col_v1:
-        st.markdown("**👁️ Настройка видимости колонок таблицы:**")
-        selected_visible_columns = st.multiselect(
-            "Выберите, какие колонки показывать в таблице ниже:",
-            options=all_possible_columns,
-            default=all_possible_columns,
-            key="visible_cols_select"
-        )
-
-    # 📊 БЛОК ЭКСПОРТА В EXCEL 📊
-    export_df_raw = filtered_df[[
-        "id", "subdivision", "name", "year_placement", "ifo",
-        "okpd2", "kosgu", "basis", "request_num", "plan_graph_num",
-        "plan_2027", "plan_2028", "nmck_2027", "nmck_2028",
-        "played_2027", "played_2028", "rem_2027", "rem_2028"
-    ]].copy()
-    export_df_raw.columns = all_possible_columns
-
-    if selected_visible_columns:
-        export_df_final = export_df_raw[selected_visible_columns].copy()
-    else:
-        export_df_final = export_df_raw.copy()
-
-    # Генерация готового .xlsx файла в памяти
-    excel_buffer = io.BytesIO()
-    with pd.ExcelWriter(excel_buffer, engine='openpyxl') as writer:
-        export_df_final.to_excel(writer, index=False, sheet_name='Реестр закупок')
-    excel_buffer.seek(0)
-
-    with col_v2:
-        st.markdown("**📊 Экспорт отчета:**")
-        st.download_button(
-            label="📊 Скачать в Excel (.xlsx)",
-            data=excel_buffer,
-            file_name=f"reestr_zakupok_{datetime.now().strftime('%d_%m_%Y')}.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            key="download_excel_btn"
-        )
-
-    display_df = export_df_raw.copy()
-    for num_col in ["Планируемая сумма; 2027 год", "Планируемая сумма; 2028 год",
-                    "Сумма по заявкам НМЦК 2027 год", "Сумма по заявкам НМЦК 2028 год",
-                    "Сумма сыгранная 2027 год", "Сумма сыгранная 2028 год",
-                    "Остаток 2027 год", "Остаток 2028 год"]:
-        display_df[num_col] = display_df[num_col].apply(fmt_num)
-
-    if selected_visible_columns:
-        display_df = display_df[selected_visible_columns]
+    # НАСТРОЙКА КОЛОНОК: Выпадающие списки в таблице (включая ИФО)
+    all_ifo_options = [s for s in get_all_ifo_sources() if s != "Прочее"]
 
     column_configuration = {
-        "ID": st.column_config.NumberColumn("ID", width="small", disabled=True),
+        "ID": st.column_config.NumberColumn("ID", width="small"),
         "Подразделение": st.column_config.SelectboxColumn("Подразделение", options=SUBDIVISIONS),
-        "Год размещения": st.column_config.SelectboxColumn("Год размещения", options=list(range(2027, 2032))),
-        "КОСГУ": st.column_config.SelectboxColumn("КОСГУ", options=KOSGU_LIST),
-        "Основание": st.column_config.SelectboxColumn("Основание", options=BASIS_LIST),
+        "ИФО": st.column_config.MultiselectColumn("ИФО", options=all_ifo_options),
+        "КОСГУ": st.column_config.SelectboxColumn("КОСГУ", options=KOSGU_LIST, width="small"),
+        "Основание": st.column_config.SelectboxColumn("Основание", options=BASIS_LIST, width="small"),
+        "Год размещения": st.column_config.NumberColumn("Год размещения", width="small", format="%d"),
         "Планируемая сумма; 2027 год": st.column_config.TextColumn("Планируемая сумма; 2027 год"),
         "Планируемая сумма; 2028 год": st.column_config.TextColumn("Планируемая сумма; 2028 год"),
         "Сумма по заявкам НМЦК 2027 год": st.column_config.TextColumn("Сумма по заявкам НМЦК 2027 год"),
@@ -782,105 +423,53 @@ if not df.empty:
         key="main_table_editor"
     )
 
-    if st.button("💾 Применить правки из таблицы"):
-        conn = get_connection()
-        for _, row in edited_df.iterrows():
-            if "ID" not in row:
-                continue
-            p_id_val = row["ID"]
+    btn_col1, btn_col2 = st.columns([1, 1])
 
-            orig_row = df[df['id'] == p_id_val].iloc[0]
+    with btn_col1:
+        if st.button("💾 Применить правки из таблицы"):
+            conn = get_connection()
+            for _, row in edited_df.iterrows():
+                updated_name = capitalize_first_letter(row["Наименование"])
 
-            upd_sub = row["Подразделение"] if "Подразделение" in row else orig_row["subdivision"]
-            upd_name = capitalize_first_letter(row["Наименование"]) if "Наименование" in row else orig_row["name"]
-            upd_yplace = row["Год размещения"] if "Год размещения" in row else orig_row["year_placement"]
-            upd_ifo = row["ИФО"] if "ИФО" in row else orig_row["ifo"]
-            upd_okpd = format_okpd(row["ОКПД2"]) if "ОКПД2" in row else orig_row["okpd2"]
-            upd_kosgu = row["КОСГУ"] if "КОСГУ" in row else orig_row["kosgu"]
-            upd_basis = row["Основание"] if "Основание" in row else orig_row["basis"]
-            upd_reqn = row["Номер предложения на закупку"] if "Номер предложения на закупку" in row else orig_row[
-                "request_num"]
-            upd_graphn = row["Номер план-графика"] if "Номер план-графика" in row else orig_row["plan_graph_num"]
+                # Форматирование ИФО обратно в строку
+                raw_ifo_val = row["ИФО"]
+                if isinstance(raw_ifo_val, list):
+                    ifo_str_val = ", ".join(raw_ifo_val)
+                else:
+                    ifo_str_val = str(raw_ifo_val)
 
-            p27 = parse_float(row["Планируемая сумма; 2027 год"]) if "Планируемая сумма; 2027 год" in row else orig_row[
-                "plan_2027"]
-            p28 = parse_float(row["Планируемая сумма; 2028 год"]) if "Планируемая сумма; 2028 год" in row else orig_row[
-                "plan_2028"]
-            n27 = parse_float(row["Сумма по заявкам НМЦК 2027 год"]) if "Сумма по заявкам НМЦК 2027 год" in row else \
-            orig_row["nmck_2027"]
-            n28 = parse_float(row["Сумма по заявкам НМЦК 2028 год"]) if "Сумма по заявкам НМЦК 2028 год" in row else \
-            orig_row["nmck_2028"]
-            s27 = parse_float(row["Сумма сыгранная 2027 год"]) if "Сумма сыгранная 2027 год" in row else orig_row[
-                "played_2027"]
-            s28 = parse_float(row["Сумма сыгранная 2028 год"]) if "Сумма сыгранная 2028 год" in row else orig_row[
-                "played_2028"]
+                p27 = parse_float(row["Планируемая сумма; 2027 год"])
+                p28 = parse_float(row["Планируемая сумма; 2028 год"])
+                n27 = parse_float(row["Сумма по заявкам НМЦК 2027 год"])
+                n28 = parse_float(row["Сумма по заявкам НМЦК 2028 год"])
+                s27 = parse_float(row["Сумма сыгранная 2027 год"])
+                s28 = parse_float(row["Сумма сыгранная 2028 год"])
 
-            r27 = p27 - n27 - s27
-            r28 = p28 - n28 - s28
+                r27 = p27 - n27 - s27
+                r28 = p28 - n28 - s28
 
-            conn.execute('''UPDATE purchases
-                            SET subdivision=?,
-                                name=?,
-                                year_placement=?,
-                                ifo=?,
-                                okpd2=?,
-                                kosgu=?,
-                                basis=?,
-                                request_num=?,
-                                plan_graph_num=?,
-                                plan_2027=?,
-                                plan_2028=?,
-                                nmck_2027=?,
-                                nmck_2028=?,
-                                played_2027=?,
-                                played_2028=?,
-                                rem_2027=?,
-                                rem_2028=?
-                            WHERE id = ?''',
-                         (upd_sub, upd_name, upd_yplace, upd_ifo, upd_okpd, upd_kosgu, upd_basis,
-                          upd_reqn, upd_graphn, p27, p28, n27, n28, s27, s28, r27, r28, p_id_val))
-        conn.commit()
-        conn.close()
-        st.success("Все изменения в базе сохранены!")
+                conn.execute('''UPDATE purchases
+                                SET subdivision=?, name=?, year_placement=?, ifo=?, okpd2=?, kosgu=?, basis=?,
+                                    request_num=?, plan_graph_num=?, plan_2027=?, plan_2028=?, nmck_2027=?, nmck_2028=?,
+                                    played_2027=?, played_2028=?, rem_2027=?, rem_2028=?
+                                WHERE id = ?''',
+                             (row["Подразделение"], updated_name, row["Год размещения"],
+                              ifo_str_val, row["ОКПД2"], row["КОСГУ"], row["Основание"],
+                              row["Номер предложения на закупку"], row["Номер план-графика"],
+                              p27, p28, n27, n28, s27, s28, r27, r28, row["ID"]))
+            conn.commit()
+            conn.close()
+            st.success("Все изменения в базе сохранены!")
 
-    # --- БЛОК БЕЗОПАСНОГО УДАЛЕНИЯ ПОЗИЦИИ ---
-    with st.expander("🗑️ Удаление позиции из реестра", expanded=False):
-        conn = get_connection()
-        all_purchases_to_delete = conn.execute("SELECT id, name, subdivision FROM purchases").fetchall()
-        conn.close()
-
-        if not all_purchases_to_delete:
-            st.info("Реестр пуст, нечего удалять.")
-        else:
-            delete_options = [f"ID: {p[0]} | {p[1]} ({p[2]})" for p in all_purchases_to_delete]
-            selected_to_delete_str = st.selectbox("Выберите закупку для ПОЛНОГО удаления:", delete_options)
-            del_id = int(selected_to_delete_str.split("ID: ")[1].split(" |")[0])
-
-            st.warning(f"⚠️ Внимание! Вместе с закупкой будут удалены ВСЕ связанные заявки, контракты и ДС.")
-            confirm_del = st.checkbox("Я понимаю, что действие необратимо", key="confirm_del_check")
-
-            if st.button("🔴 Безопасно удалить закупку", disabled=not confirm_del):
-                conn = get_connection()
-                conn.execute(
-                    "DELETE FROM ds_ifo_amounts WHERE ds_id IN (SELECT id FROM ds_agreements WHERE contract_id IN (SELECT id FROM contracts WHERE purchase_id=?));",
-                    (del_id,))
-                conn.execute(
-                    "DELETE FROM ds_agreements WHERE contract_id IN (SELECT id FROM contracts WHERE purchase_id=?);",
-                    (del_id,))
-                conn.execute(
-                    "DELETE FROM contract_ifo_amounts WHERE contract_id IN (SELECT id FROM contracts WHERE purchase_id=?);",
-                    (del_id,))
-                conn.execute("DELETE FROM contracts WHERE purchase_id=?;", (del_id,))
-                conn.execute(
-                    "DELETE FROM nmck_app_ifo_amounts WHERE app_id IN (SELECT id FROM nmck_applications WHERE purchase_id=?);",
-                    (del_id,))
-                conn.execute("DELETE FROM nmck_applications WHERE purchase_id=?;", (del_id,))
-                conn.execute("DELETE FROM budget_breakdown WHERE purchase_id=?;", (del_id,))
-                conn.execute("DELETE FROM purchases WHERE id=?;", (del_id,))
-                conn.commit()
-                conn.close()
-                st.success("Позиция и все связанные данные успешно удалены!")
-                st.rerun()
+    with btn_col2:
+        # КНОПКА СКАЧИВАНИЯ В EXCEL С РАСЧЕРЧЕННЫМИ ПОЛЯМИ
+        excel_data = generate_excel_with_borders(edited_df)
+        st.download_button(
+            label="📥 Скачать реестр в Excel (с рамками)",
+            data=excel_data,
+            file_name=f"Реестр_Закупок_{datetime.now().strftime('%Y-%m-%d')}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
 
     # --- УМНЫЙ СВЯЗАННЫЙ ПОИСК ЗАКУПКИ ---
     st.divider()
@@ -890,8 +479,7 @@ if not df.empty:
 
     with col_s1:
         all_names = list(df['name'].unique())
-        chosen_name = st.selectbox("🔍 Поиск закупки по названию:", options=["-- Выберите --"] + all_names,
-                                   key="search_name_box")
+        chosen_name = st.selectbox("🔍 Поиск закупки по названию:", options=["-- Выберите --"] + all_names, key="search_name_box")
 
     if chosen_name != "-- Выберите --":
         matching_ids = list(df[df['name'] == chosen_name]['id'].unique())
@@ -899,8 +487,7 @@ if not df.empty:
         matching_ids = list(df['id'].unique())
 
     with col_s2:
-        chosen_id = st.selectbox("🔢 Поиск по ID (индексу):", options=["-- Выберите ID --"] + matching_ids,
-                                 key="search_id_box")
+        chosen_id = st.selectbox("🔢 Поиск по ID (индексу):", options=["-- Выберите ID --"] + matching_ids, key="search_id_box")
 
     selected_id = None
     if chosen_id != "-- Выберите ID --":
@@ -919,13 +506,7 @@ if not df.empty:
         if not selected_sources_for_purchase:
             selected_sources_for_purchase = ["ВБ", "ГЗ", "ОМС", "Субсидия"]
 
-        st.markdown(f"""
-        <div style="background-color: #f0f9ff; border-left: 5px solid #0284c7; padding: 12px 16px; border-radius: 6px; margin-bottom: 15px;">
-            <span style="font-size: 16px; color: #0369a1; font-weight: bold;">📌 Выбрана позиция:</span> 
-            <span style="font-size: 16px; color: #0f172a; font-weight: bold;">{selected_name}</span> 
-            <span style="color: #475569;">(ID: <b>{sel_id}</b> | ИФО: <b>{', '.join(selected_sources_for_purchase)}</b>)</span>
-        </div>
-        """, unsafe_allow_html=True)
+        st.success(f"📌 Выбрана позиция: **{selected_name}** (ID: {sel_id}, ИФО: {', '.join(selected_sources_for_purchase)})")
 
         # --- БЛОК 1: РАСПРЕДЕЛЕНИЕ БЮДЖЕТА ПО ИСТОЧНИКАМ (ИФО) ---
         with st.expander("💰 Распределение бюджета по источникам (ИФО)", expanded=True):
@@ -945,21 +526,18 @@ if not df.empty:
                             conn.close()
 
                             init_val = float(old_val[0]) if (old_val and old_val[0] > 0) else None
-                            val = st.number_input(f"{source} ({year})", value=init_val,
-                                                  key=f"break_{sel_id}_{year}_{source}")
+                            val = st.number_input(f"{source} ({year})", value=init_val, key=f"break_{sel_id}_{year}_{source}")
                             val_clean = val if val is not None else 0.0
                             total_for_year += val_clean
 
                             conn = get_connection()
                             conn.execute("DELETE FROM budget_breakdown WHERE purchase_id=? AND year=? AND ifo_name=?",
                                          (sel_id, year, source))
-                            conn.execute("INSERT INTO budget_breakdown VALUES (?,?,?,?)",
-                                         (sel_id, year, source, val_clean))
+                            conn.execute("INSERT INTO budget_breakdown VALUES (?,?,?,?)", (sel_id, year, source, val_clean))
                             conn.commit()
                             conn.close()
 
-                        st.markdown(f'<div class="total-summary">ИТОГО {year}: {fmt_num(total_for_year)}</div>',
-                                    unsafe_allow_html=True)
+                        st.write(f"**ИТОГО {year}: {fmt_num(total_for_year)}**")
                         conn = get_connection()
                         conn.execute(f"UPDATE purchases SET plan_{year} = ? WHERE id = ?", (total_for_year, sel_id))
                         conn.commit()
@@ -979,23 +557,14 @@ if not df.empty:
                     st.markdown(f"**Заявки на {year} год**")
                     with st.container(border=True):
                         conn = get_connection()
-
-                        contracted_1c_tuples = conn.execute(
-                            "SELECT DISTINCT onec_num FROM contracts WHERE purchase_id=? AND year=? AND onec_num IS NOT NULL AND onec_num != ''",
-                            (sel_id, year)).fetchall()
-                        contracted_1c_set = set(t[0] for t in contracted_1c_tuples)
-
                         applications = conn.execute(
-                            "SELECT id, onec_num, memo_num, memo_date FROM nmck_applications WHERE purchase_id=? AND year=?",
+                            "SELECT id, onec_num FROM nmck_applications WHERE purchase_id=? AND year=?",
                             (sel_id, year)).fetchall()
-
-                        active_applications = [app for app in applications if app[1] not in contracted_1c_set]
 
                         total_nmck_year = 0.0
 
-                        if active_applications:
-                            for app_idx, (app_id, onec_val, memo_num_val, memo_date_val) in enumerate(
-                                    active_applications, start=1):
+                        if applications:
+                            for app_idx, (app_id, onec_val) in enumerate(applications, start=1):
                                 app_ifo_amounts = conn.execute(
                                     "SELECT id, ifo_source, amount FROM nmck_app_ifo_amounts WHERE app_id=?",
                                     (app_id,)).fetchall()
@@ -1003,25 +572,12 @@ if not df.empty:
                                 current_app_total = sum(item[2] for item in app_ifo_amounts)
                                 total_nmck_year += current_app_total
 
-                                memo_label = f" | СЗ №{memo_num_val}" if memo_num_val else ""
-                                with st.expander(
-                                        f"📝 Заявка 1С: {onec_val if onec_val else '—'}{memo_label} (Итого: {fmt_num(current_app_total)})",
-                                        expanded=False):
-                                    st.markdown(
-                                        f'<span class="badge-1c">📋 Номер 1С: {onec_val if onec_val else "—"}</span>',
-                                        unsafe_allow_html=True)
-                                    if memo_num_val or memo_date_val:
-                                        st.markdown(
-                                            f"**Служебная записка:** № `{memo_num_val if memo_num_val else '—'}` от `{memo_date_val if memo_date_val else '—'}`")
-
-                                    st.markdown('<div style="margin-top: 6px;"></div>', unsafe_allow_html=True)
+                                with st.expander(f"📝 Заявка 1С: {onec_val if onec_val else '—'} (Итого: {fmt_num(current_app_total)})", expanded=False):
+                                    st.markdown(f"**Номер 1С: {onec_val if onec_val else '—'}**")
                                     for item_id, ifo_src, amount in app_ifo_amounts:
-                                        st.write(
-                                            f"- **{ifo_src}**: <span style='color: #0f172a; font-weight: 600;'>{fmt_num(amount)}</span>",
-                                            unsafe_allow_html=True)
+                                        st.write(f"- {ifo_src}: {fmt_num(amount)}")
 
-                                    st.markdown('<span class="rem-header">💡 Остаток после этой заявки:</span>',
-                                                unsafe_allow_html=True)
+                                    st.markdown(f"**Остаток после этой заявки:**")
                                     for source in selected_sources_for_purchase:
                                         budget_ifo = conn.execute(
                                             "SELECT amount FROM budget_breakdown WHERE purchase_id=? AND year=? AND ifo_name=?",
@@ -1029,33 +585,15 @@ if not df.empty:
                                         budget_ifo = budget_ifo[0] if budget_ifo else 0.0
 
                                         current_nmck_ifo_sum = conn.execute(
-                                            """SELECT SUM(t2.amount)
-                                               FROM nmck_applications t1
-                                                        JOIN nmck_app_ifo_amounts t2 ON t1.id = t2.app_id
-                                               WHERE t1.purchase_id = ?
-                                                 AND t1.year = ?
-                                                 AND t2.ifo_source = ?
-                                                 AND (t1.onec_num IS NULL OR t1.onec_num = '' OR t1.onec_num NOT IN
-                                                                                                 (SELECT DISTINCT onec_num
-                                                                                                  FROM contracts
-                                                                                                  WHERE purchase_id = ? AND year = ?
-                                                                                                    AND onec_num IS NOT NULL
-                                                                                                    AND onec_num != ''
-                                                   )
-                                                   )""",
-                                            (sel_id, year, source, sel_id, year)).fetchone()
-                                        current_nmck_ifo_sum = current_nmck_ifo_sum[0] if (
-                                                    current_nmck_ifo_sum and current_nmck_ifo_sum[
-                                                0] is not None) else 0.0
+                                            "SELECT SUM(t2.amount) FROM nmck_applications t1 JOIN nmck_app_ifo_amounts t2 ON t1.id = t2.app_id WHERE t1.purchase_id=? AND t1.year=? AND t2.ifo_source=?",
+                                            (sel_id, year, source)).fetchone()
+                                        current_nmck_ifo_sum = current_nmck_ifo_sum[0] if current_nmck_ifo_sum[0] is not None else 0.0
 
-                                        st.write(
-                                            f"- **{source}**: <span style='color: #047857; font-weight: bold;'>{fmt_num(budget_ifo - current_nmck_ifo_sum)}</span>",
-                                            unsafe_allow_html=True)
+                                        st.write(f"- {source}: {fmt_num(budget_ifo - current_nmck_ifo_sum)}")
 
                                     c_col1, c_col2 = st.columns([1, 1])
                                     if c_col1.button("✏️", key=f"edit_nmck_btn_{app_id}"):
-                                        st.session_state[f"editing_nmck_{app_id}"] = not st.session_state.get(
-                                            f"editing_nmck_{app_id}", False)
+                                        st.session_state[f"editing_nmck_{app_id}"] = not st.session_state.get(f"editing_nmck_{app_id}", False)
                                     if c_col2.button("❌", key=f"del_nmck_app_{app_id}"):
                                         conn.execute("DELETE FROM nmck_applications WHERE id=?", (app_id,))
                                         conn.execute("DELETE FROM nmck_app_ifo_amounts WHERE app_id=?", (app_id,))
@@ -1063,36 +601,22 @@ if not df.empty:
                                         st.rerun()
 
                                     if st.session_state.get(f"editing_nmck_{app_id}", False):
-                                        e_onec = st.text_input("Изменить Номер 1С", value=onec_val if onec_val else "",
-                                                               key=f"e_onec_in_{app_id}")
-                                        e_memo_num = st.text_input("Изменить Номер служебной записки",
-                                                                   value=memo_num_val if memo_num_val else "",
-                                                                   key=f"e_memonum_in_{app_id}")
-                                        init_d_val = datetime.strptime(memo_date_val, "%d-%m-%Y").date() if (
-                                                    memo_date_val and memo_date_val != '') else None
-                                        e_memo_date = st.date_input("Изменить Дату служебной записки", value=init_d_val,
-                                                                    format="DD-MM-YYYY", key=f"e_memodate_in_{app_id}")
+                                        with st.form(key=f"form_edit_nmck_{app_id}"):
+                                            e_onec = st.text_input("Изменить Номер 1С", value=onec_val if onec_val else "")
+                                            st.markdown("**Изменить суммы по ИФО:**")
+                                            edited_ifo_amounts = {}
+                                            for item_id, ifo_src, amount in app_ifo_amounts:
+                                                init_amt = float(amount) if amount > 0 else None
+                                                edited_ifo_amounts[ifo_src] = st.number_input(f"{ifo_src}", value=init_amt, key=f"edit_app_ifo_{item_id}")
 
-                                        st.markdown("**Изменить суммы по ИФО:**")
-                                        edited_ifo_amounts = {}
-                                        for item_id, ifo_src, amount in app_ifo_amounts:
-                                            init_amt = float(amount) if amount > 0 else None
-                                            edited_ifo_amounts[ifo_src] = st.number_input(f"{ifo_src}", value=init_amt,
-                                                                                          key=f"edit_app_ifo_{item_id}")
-
-                                        if st.button("Сохранить изменения заявки", key=f"btn_save_edit_app_{app_id}"):
-                                            e_memo_d_str = e_memo_date.strftime("%d-%m-%Y") if e_memo_date else ""
-                                            conn.execute(
-                                                "UPDATE nmck_applications SET onec_num=?, memo_num=?, memo_date=? WHERE id=?",
-                                                (e_onec, e_memo_num, e_memo_d_str, app_id))
-                                            for ifo_src, amount in edited_ifo_amounts.items():
-                                                clean_amt = amount if amount is not None else 0.0
-                                                conn.execute(
-                                                    "UPDATE nmck_app_ifo_amounts SET amount=? WHERE app_id=? AND ifo_source=?",
-                                                    (clean_amt, app_id, ifo_src))
-                                            conn.commit()
-                                            st.session_state[f"editing_nmck_{app_id}"] = False
-                                            st.rerun()
+                                            if st.form_submit_button("Сохранить изменения заявки"):
+                                                conn.execute("UPDATE nmck_applications SET onec_num=? WHERE id=?", (e_onec, app_id))
+                                                for ifo_src, amount in edited_ifo_amounts.items():
+                                                    clean_amt = amount if amount is not None else 0.0
+                                                    conn.execute("UPDATE nmck_app_ifo_amounts SET amount=? WHERE app_id=? AND ifo_source=?", (clean_amt, app_id, ifo_src))
+                                                conn.commit()
+                                                st.session_state[f"editing_nmck_{app_id}"] = False
+                                                st.rerun()
 
                         st.caption("Добавить новую заявку:")
 
@@ -1102,14 +626,6 @@ if not df.empty:
                         cur_app_cnt = st.session_state[app_counter_key]
 
                         new_onec = st.text_input("Номер 1С", key=f"new_onec_app_{sel_id}_{year}_{cur_app_cnt}")
-
-                        m_col1, m_col2 = st.columns(2)
-                        new_memo_num = m_col1.text_input("Номер служебной записки на закупку",
-                                                         key=f"new_memo_num_{sel_id}_{year}_{cur_app_cnt}")
-                        new_memo_date = m_col2.date_input("Дата служебной записки на закупку", value=None,
-                                                          format="DD-MM-YYYY",
-                                                          key=f"new_memo_date_{sel_id}_{year}_{cur_app_cnt}")
-
                         st.markdown("**Суммы по источникам:**")
                         new_app_ifo_amounts = {}
 
@@ -1120,23 +636,9 @@ if not df.empty:
                             budget_ifo_val = budget_ifo_val[0] if budget_ifo_val else 0.0
 
                             prev_apps_sum = conn.execute(
-                                """SELECT SUM(t2.amount)
-                                   FROM nmck_applications t1
-                                            JOIN nmck_app_ifo_amounts t2 ON t1.id = t2.app_id
-                                   WHERE t1.purchase_id = ?
-                                     AND t1.year = ?
-                                     AND t2.ifo_source = ?
-                                     AND (t1.onec_num IS NULL OR t1.onec_num = '' OR t1.onec_num NOT IN
-                                                                                     (SELECT DISTINCT onec_num
-                                                                                      FROM contracts
-                                                                                      WHERE purchase_id = ? AND year = ?
-                                                                                        AND onec_num IS NOT NULL
-                                                                                        AND onec_num != ''
-                                       )
-                                       )""",
-                                (sel_id, year, source, sel_id, year)).fetchone()
-                            prev_apps_sum = prev_apps_sum[0] if (
-                                        prev_apps_sum and prev_apps_sum[0] is not None) else 0.0
+                                "SELECT SUM(t2.amount) FROM nmck_applications t1 JOIN nmck_app_ifo_amounts t2 ON t1.id = t2.app_id WHERE t1.purchase_id=? AND t1.year=? AND t2.ifo_source=?",
+                                (sel_id, year, source)).fetchone()
+                            prev_apps_sum = prev_apps_sum[0] if prev_apps_sum[0] is not None else 0.0
 
                             rem_avail = budget_ifo_val - prev_apps_sum
 
@@ -1148,27 +650,23 @@ if not df.empty:
                             )
 
                         if st.button(f"➕ Добавить заявку ({year})", key=f"btn_add_nmck_app_{sel_id}_{year}"):
-                            clean_amounts = {src: (amt if amt is not None else 0.0) for src, amt in
-                                             new_app_ifo_amounts.items()}
+                            clean_amounts = {src: (amt if amt is not None else 0.0) for src, amt in new_app_ifo_amounts.items()}
                             total_new_app_amount = sum(clean_amounts.values())
                             if total_new_app_amount > 0:
-                                memo_d_str = new_memo_date.strftime("%d-%m-%Y") if new_memo_date else ""
-                                cursor = conn.execute(
-                                    "INSERT INTO nmck_applications (purchase_id, year, onec_num, memo_num, memo_date) VALUES (?,?,?,?,?)",
-                                    (sel_id, year, new_onec, new_memo_num, memo_d_str))
+                                cursor = conn.execute("INSERT INTO nmck_applications (purchase_id, year, onec_num) VALUES (?,?,?)",
+                                                     (sel_id, year, new_onec))
                                 new_app_id = cursor.lastrowid
                                 for ifo_src, amount in clean_amounts.items():
                                     if amount > 0:
-                                        conn.execute(
-                                            "INSERT INTO nmck_app_ifo_amounts (app_id, ifo_source, amount) VALUES (?,?,?)",
-                                            (new_app_id, ifo_src, amount))
+                                        conn.execute("INSERT INTO nmck_app_ifo_amounts (app_id, ifo_source, amount) VALUES (?,?,?)",
+                                                     (new_app_id, ifo_src, amount))
                                 conn.commit()
 
                                 st.session_state[app_counter_key] += 1
                                 st.rerun()
 
-                        st.markdown(f'<div class="total-summary">ИТОГО НМЦК {year}: {fmt_num(total_nmck_year)}</div>',
-                                    unsafe_allow_html=True)
+                        st.markdown(f"---")
+                        st.write(f"**ИТОГО НМЦК {year}: {fmt_num(total_nmck_year)}**")
 
                         conn.execute(f"UPDATE purchases SET nmck_{year} = ? WHERE id = ?", (total_nmck_year, sel_id))
                         conn.commit()
@@ -1221,9 +719,7 @@ if not df.empty:
                                     last_ds_map = {item[0]: item[1] for item in ds_ifo_items}
 
                                     for source in selected_sources_for_purchase:
-                                        effective_contract_ifo_map[source] = last_ds_map.get(source,
-                                                                                             base_contract_ifo_map.get(
-                                                                                                 source, 0.0))
+                                        effective_contract_ifo_map[source] = last_ds_map.get(source, base_contract_ifo_map.get(source, 0.0))
                                 else:
                                     for source in selected_sources_for_purchase:
                                         effective_contract_ifo_map[source] = base_contract_ifo_map.get(source, 0.0)
@@ -1231,93 +727,63 @@ if not df.empty:
                                 full_contract_total = sum(effective_contract_ifo_map.values())
                                 total_played_year += full_contract_total
 
-                                display_cnt_num = cnum if cnum else f"№{idx}"
-                                st.markdown(
-                                    f'<span class="badge-contract">📜 Контракт {display_cnt_num}</span> (1С: <span class="badge-1c">{c1c}</span>, Дата: <b>{cdate}</b>)',
-                                    unsafe_allow_html=True)
-                                st.markdown('<div style="margin-top: 4px;"></div>', unsafe_allow_html=True)
+                                st.markdown(f"**Контракт №{idx}** (1С: **{c1c}**, Дата: {cdate})")
                                 for source, effective_amount in effective_contract_ifo_map.items():
-                                    st.write(
-                                        f"- **{source}**: <span style='color: #0f172a; font-weight: 600;'>{fmt_num(effective_amount)}</span>",
-                                        unsafe_allow_html=True)
+                                    st.write(f"- {source}: {fmt_num(effective_amount)}")
                                 if last_ds:
                                     st.caption(f"*(Учтены актуальные данные из последнего ДС №{last_ds[1]})*")
-                                st.markdown(
-                                    f"**ИТОГО КОНТРАКТА: <span style='color: #0284c7;'>{fmt_num(full_contract_total)}</span>**",
-                                    unsafe_allow_html=True)
-                                if ccomm:
-                                    st.caption(f"💬 {ccomm}")
+                                st.write(f"**ИТОГО КОНТРАКТА: {fmt_num(full_contract_total)}**")
+                                st.caption(f"💬 {ccomm}" if ccomm else "")
 
                                 k_col1, k_col2 = st.columns([1, 1])
                                 if k_col1.button("✏️", key=f"edit_cnt_btn_{contract_id}"):
-                                    st.session_state[f"editing_cnt_{contract_id}"] = not st.session_state.get(
-                                        f"editing_cnt_{contract_id}", False)
+                                    st.session_state[f"editing_cnt_{contract_id}"] = not st.session_state.get(f"editing_cnt_{contract_id}", False)
                                 if k_col2.button("❌", key=f"del_cnt_{contract_id}"):
                                     conn.execute("DELETE FROM contracts WHERE id=?", (contract_id,))
                                     conn.execute("DELETE FROM contract_ifo_amounts WHERE contract_id=?", (contract_id,))
                                     conn.execute("DELETE FROM ds_agreements WHERE contract_id=?", (contract_id,))
-                                    conn.execute(
-                                        "DELETE FROM ds_ifo_amounts WHERE ds_id IN (SELECT id FROM ds_agreements WHERE contract_id=?);",
-                                        (contract_id,))
+                                    conn.execute("DELETE FROM ds_ifo_amounts WHERE ds_id IN (SELECT id FROM ds_agreements WHERE contract_id=?);", (contract_id,))
                                     conn.commit()
                                     st.rerun()
 
                                 if st.session_state.get(f"editing_cnt_{contract_id}", False):
-                                    ec_num = st.text_input("Изменить Номер контракта", value=cnum if cnum else "",
-                                                           key=f"ec_num_{contract_id}")
-                                    ec_1c = st.selectbox("Изменить 1С", options=avail_1c_from_apps,
-                                                         index=avail_1c_from_apps.index(
-                                                             c1c) if c1c in avail_1c_from_apps else 0,
-                                                         key=f"ec_1c_{contract_id}")
-                                    ec_date = st.date_input("Изменить Дату",
-                                                            value=datetime.strptime(cdate, "%d-%m-%Y").date(),
-                                                            format="DD-MM-YYYY", key=f"ec_date_{contract_id}")
-                                    st.markdown("**Изменить суммы по ИФО (основа контракта):**")
-                                    edited_contract_ifo_amounts = {}
-                                    for item_id, ifo_src, amount in contract_ifo_amounts:
-                                        init_cnt_amt = float(amount) if amount > 0 else None
-                                        edited_contract_ifo_amounts[ifo_src] = st.number_input(f"{ifo_src}",
-                                                                                               value=init_cnt_amt,
-                                                                                               key=f"edit_contract_ifo_{item_id}")
-                                    ec_comm = st.text_input("Изменить Комментарий", value=ccomm if ccomm else "",
-                                                            key=f"ec_comm_{contract_id}")
-                                    if st.button("Сохранить изменения контракта", key=f"btn_save_ec_{contract_id}"):
-                                        conn.execute(
-                                            "UPDATE contracts SET contract_num=?, onec_num=?, contract_date=?, comment=? WHERE id=?",
-                                            (ec_num, ec_1c, ec_date.strftime("%d-%m-%Y"), ec_comm, contract_id))
-                                        for ifo_src, amount in edited_contract_ifo_amounts.items():
-                                            clean_amt = amount if amount is not None else 0.0
-                                            conn.execute(
-                                                "UPDATE contract_ifo_amounts SET amount=? WHERE contract_id=? AND ifo_source=?",
-                                                (clean_amt, contract_id, ifo_src))
-                                        conn.commit()
-                                        st.session_state[f"editing_cnt_{contract_id}"] = False
-                                        st.rerun()
+                                    with st.form(key=f"form_edit_cnt_{contract_id}"):
+                                        ec_1c = st.selectbox("Изменить 1С", options=avail_1c_from_apps, index=avail_1c_from_apps.index(c1c) if c1c in avail_1c_from_apps else 0)
+                                        ec_date = st.date_input("Изменить Дату", value=datetime.strptime(cdate, "%d-%m-%Y").date(), format="DD-MM-YYYY")
+                                        st.markdown("**Изменить суммы по ИФО (основа контракта):**")
+                                        edited_contract_ifo_amounts = {}
+                                        for item_id, ifo_src, amount in contract_ifo_amounts:
+                                            init_cnt_amt = float(amount) if amount > 0 else None
+                                            edited_contract_ifo_amounts[ifo_src] = st.number_input(f"{ifo_src}", value=init_cnt_amt, key=f"edit_contract_ifo_{item_id}")
+                                        ec_comm = st.text_input("Изменить Комментарий", value=ccomm if ccomm else "")
+                                        if st.form_submit_button("Сохранить изменения контракта"):
+                                            conn.execute("UPDATE contracts SET onec_num=?, contract_date=?, comment=? WHERE id=?",
+                                                         (ec_1c, ec_date.strftime("%d-%m-%Y"), ec_comm, contract_id))
+                                            for ifo_src, amount in edited_contract_ifo_amounts.items():
+                                                clean_amt = amount if amount is not None else 0.0
+                                                conn.execute("UPDATE contract_ifo_amounts SET amount=? WHERE contract_id=? AND ifo_source=?", (clean_amt, contract_id, ifo_src))
+                                            conn.commit()
+                                            st.session_state[f"editing_cnt_{contract_id}"] = False
+                                            st.rerun()
                                 st.markdown("---")
 
                                 # --- БЛОК ДОПОЛНИТЕЛЬНЫХ СОГЛАШЕНИЙ (ДС) ---
                                 with st.expander(f"📑 Доп. соглашения (ДС) к контракту №{idx}", expanded=False):
-                                    ds_items = conn.execute(
-                                        "SELECT id, ds_num, ds_date, comment FROM ds_agreements WHERE contract_id=?",
-                                        (contract_id,)).fetchall()
+                                    ds_items = conn.execute("SELECT id, ds_num, ds_date, comment FROM ds_agreements WHERE contract_id=?", (contract_id,)).fetchall()
 
                                     if ds_items:
                                         for ds_rec_id, ds_num_val, ds_date_val, ds_comm_val in ds_items:
-                                            st.markdown(
-                                                f'<span class="badge-ds">📑 ДС №{ds_num_val}</span> (Дата: <b>{ds_date_val}</b>)',
-                                                unsafe_allow_html=True)
+                                            st.markdown(f"**ДС №{ds_num_val}** (Дата: {ds_date_val})")
                                             ds_ifo_items = conn.execute(
                                                 "SELECT id, ifo_source, amount FROM ds_ifo_amounts WHERE ds_id=?",
                                                 (ds_rec_id,)).fetchall()
                                             for ds_ifo_id, ds_ifo_src, ds_ifo_amt in ds_ifo_items:
-                                                st.write(f"- **{ds_ifo_src}**: {fmt_num(ds_ifo_amt)}")
-                                            if ds_comm_val:
-                                                st.caption(f"💬 {ds_comm_val}")
+                                                st.write(f"- {ds_ifo_src}: {fmt_num(ds_ifo_amt)}")
+                                            st.caption(f"💬 {ds_comm_val}" if ds_comm_val else "")
 
-                                            ds_b1, ds_b2 = st.columns([1, 1])
+                                            ds_b1, ds_b2 = st.columns([1,1])
                                             if ds_b1.button("✏️", key=f"edit_ds_btn_{ds_rec_id}"):
-                                                st.session_state[f"editing_ds_{ds_rec_id}"] = not st.session_state.get(
-                                                    f"editing_ds_{ds_rec_id}", False)
+                                                st.session_state[f"editing_ds_{ds_rec_id}"] = not st.session_state.get(f"editing_ds_{ds_rec_id}", False)
                                             if ds_b2.button("❌", key=f"del_ds_{ds_rec_id}"):
                                                 conn.execute("DELETE FROM ds_agreements WHERE id=?", (ds_rec_id,))
                                                 conn.execute("DELETE FROM ds_ifo_amounts WHERE ds_id=?", (ds_rec_id,))
@@ -1325,36 +791,24 @@ if not df.empty:
                                                 st.rerun()
 
                                             if st.session_state.get(f"editing_ds_{ds_rec_id}", False):
-                                                e_ds_num = st.text_input("Изменить № ДС", value=ds_num_val,
-                                                                         key=f"eds_num_{ds_rec_id}")
-                                                e_ds_date = st.date_input("Изменить Дату ДС",
-                                                                          value=datetime.strptime(ds_date_val,
-                                                                                                  "%d-%m-%Y").date(),
-                                                                          format="DD-MM-YYYY",
-                                                                          key=f"eds_date_{ds_rec_id}")
-                                                st.markdown("**Изменить суммы по ИФО:**")
-                                                edited_ds_ifo_amounts = {}
-                                                for ds_ifo_id, ds_ifo_src, ds_ifo_amt in ds_ifo_items:
-                                                    init_ds_amt = float(ds_ifo_amt) if ds_ifo_amt > 0 else None
-                                                    edited_ds_ifo_amounts[ds_ifo_src] = st.number_input(f"{ds_ifo_src}",
-                                                                                                        value=init_ds_amt,
-                                                                                                        key=f"edit_ds_ifo_{ds_ifo_id}")
-                                                e_ds_comm = st.text_input("Изменить Комментарий",
-                                                                          value=ds_comm_val if ds_comm_val else "",
-                                                                          key=f"eds_comm_{ds_rec_id}")
-                                                if st.button("Сохранить изменения ДС", key=f"btn_save_eds_{ds_rec_id}"):
-                                                    conn.execute(
-                                                        "UPDATE ds_agreements SET ds_num=?, ds_date=?, comment=? WHERE id=?",
-                                                        (e_ds_num, e_ds_date.strftime("%d-%m-%Y"), e_ds_comm,
-                                                         ds_rec_id))
-                                                    for ifo_src, amount in edited_ds_ifo_amounts.items():
-                                                        clean_amt = amount if amount is not None else 0.0
-                                                        conn.execute(
-                                                            "UPDATE ds_ifo_amounts SET amount=? WHERE ds_id=? AND ifo_source=?",
-                                                            (clean_amt, ds_rec_id, ifo_src))
-                                                    conn.commit()
-                                                    st.session_state[f"editing_ds_{ds_rec_id}"] = False
-                                                    st.rerun()
+                                                with st.form(key=f"form_edit_ds_{ds_rec_id}"):
+                                                    e_ds_num = st.text_input("Изменить № ДС", value=ds_num_val)
+                                                    e_ds_date = st.date_input("Изменить Дату ДС", value=datetime.strptime(ds_date_val, "%d-%m-%Y").date(), format="DD-MM-YYYY")
+                                                    st.markdown("**Изменить суммы по ИФО:**")
+                                                    edited_ds_ifo_amounts = {}
+                                                    for ds_ifo_id, ds_ifo_src, ds_ifo_amt in ds_ifo_items:
+                                                        init_ds_amt = float(ds_ifo_amt) if ds_ifo_amt > 0 else None
+                                                        edited_ds_ifo_amounts[ds_ifo_src] = st.number_input(f"{ds_ifo_src}", value=init_ds_amt, key=f"edit_ds_ifo_{ds_ifo_id}")
+                                                    e_ds_comm = st.text_input("Изменить Комментарий", value=ds_comm_val if ds_comm_val else "")
+                                                    if st.form_submit_button("Сохранить изменения ДС"):
+                                                        conn.execute("UPDATE ds_agreements SET ds_num=?, ds_date=?, comment=? WHERE id=?",
+                                                                     (e_ds_num, e_ds_date.strftime("%d-%m-%Y"), e_ds_comm, ds_rec_id))
+                                                        for ifo_src, amount in edited_ds_ifo_amounts.items():
+                                                            clean_amt = amount if amount is not None else 0.0
+                                                            conn.execute("UPDATE ds_ifo_amounts SET amount=? WHERE ds_id=? AND ifo_source=?", (clean_amt, ds_rec_id, ifo_src))
+                                                        conn.commit()
+                                                        st.session_state[f"editing_ds_{ds_rec_id}"] = False
+                                                        st.rerun()
                                             st.markdown("---")
 
                                     st.caption("Добавить новое Дополнительное Соглашение (ДС):")
@@ -1364,29 +818,22 @@ if not df.empty:
                                     cur_ds_cnt = st.session_state[ds_cnt_key]
 
                                     new_ds_num = st.text_input("№ ДС", key=f"new_ds_num_{contract_id}_{cur_ds_cnt}")
-                                    new_ds_date = st.date_input("Дата ДС", format="DD-MM-YYYY",
-                                                                key=f"new_ds_date_{contract_id}_{cur_ds_cnt}")
+                                    new_ds_date = st.date_input("Дата ДС", format="DD-MM-YYYY", key=f"new_ds_date_{contract_id}_{cur_ds_cnt}")
                                     st.markdown("**Суммы скорректированного контракта по источникам:**")
                                     new_ds_ifo_amounts = {}
                                     for source in selected_sources_for_purchase:
                                         eff_val = float(effective_contract_ifo_map.get(source, 0.0))
-                                        new_ds_ifo_amounts[source] = st.number_input(f"{source}", value=None,
-                                                                                     placeholder=f"Предыдущий: {fmt_num(eff_val)}",
-                                                                                     key=f"new_ds_ifo_{contract_id}_{source}_{cur_ds_cnt}")
-                                    new_ds_comm = st.text_input("Комментарий к ДС",
-                                                                key=f"new_ds_comm_{contract_id}_{cur_ds_cnt}")
+                                        new_ds_ifo_amounts[source] = st.number_input(f"{source}", value=None, placeholder=f"Предыдущий: {fmt_num(eff_val)}", key=f"new_ds_ifo_{contract_id}_{source}_{cur_ds_cnt}")
+                                    new_ds_comm = st.text_input("Комментарий к ДС", key=f"new_ds_comm_{contract_id}_{cur_ds_cnt}")
 
                                     if st.button(f"➕ Добавить ДС к контракту №{idx}", key=f"btn_add_ds_{contract_id}"):
-                                        cursor = conn.execute(
-                                            "INSERT INTO ds_agreements (contract_id, ds_num, ds_date, comment) VALUES (?,?,?,?)",
-                                            (contract_id, new_ds_num if new_ds_num else "ДС",
-                                             new_ds_date.strftime("%d-%m-%Y"), new_ds_comm))
+                                        cursor = conn.execute("INSERT INTO ds_agreements (contract_id, ds_num, ds_date, comment) VALUES (?,?,?,?)",
+                                                             (contract_id, new_ds_num if new_ds_num else "ДС", new_ds_date.strftime("%d-%m-%Y"), new_ds_comm))
                                         new_ds_id = cursor.lastrowid
                                         for ifo_src, amount in new_ds_ifo_amounts.items():
                                             clean_amt = amount if amount is not None else 0.0
-                                            conn.execute(
-                                                "INSERT INTO ds_ifo_amounts (ds_id, ifo_source, amount) VALUES (?,?,?)",
-                                                (new_ds_id, ifo_src, clean_amt))
+                                            conn.execute("INSERT INTO ds_ifo_amounts (ds_id, ifo_source, amount) VALUES (?,?,?)",
+                                                         (new_ds_id, ifo_src, clean_amt))
                                         conn.commit()
 
                                         st.session_state[ds_cnt_key] += 1
@@ -1404,63 +851,79 @@ if not df.empty:
                                 st.session_state[cnt_counter_key] = 0
                             cur_cnt_cnt = st.session_state[cnt_counter_key]
 
-                            ca1, ca2, ca3, ca4 = st.columns([2, 2, 2, 2])
-                            c_num_input = ca1.text_input("Номер контракта", key=f"c_num_{sel_id}_{year}_{cur_cnt_cnt}")
-                            c_1c_sel = ca2.selectbox("Номер 1С (из заявок)", options=avail_1c_from_apps,
-                                                     key=f"c_1c_{sel_id}_{year}_{cur_cnt_cnt}")
-                            c_date_val = ca3.date_input("Дата контракта", format="DD-MM-YYYY",
-                                                        key=f"c_date_{sel_id}_{year}_{cur_cnt_cnt}")
-                            c_comm_val = ca4.text_input("Комментарий", key=f"c_comm_{sel_id}_{year}_{cur_cnt_cnt}")
+                            ca1, ca2, ca3 = st.columns([2, 2, 2])
+                            c_1c_sel = ca1.selectbox("Номер 1С (из заявок)", options=avail_1c_from_apps, key=f"c_1c_{sel_id}_{year}_{cur_cnt_cnt}")
+                            c_date_val = ca2.date_input("Дата контракта", format="DD-MM-YYYY", key=f"c_date_{sel_id}_{year}_{cur_cnt_cnt}")
+                            c_comm_val = ca3.text_input("Комментарий", key=f"c_comm_{sel_id}_{year}_{cur_cnt_cnt}")
 
                             st.markdown("**Суммы по источникам (основа контракта):**")
-                            selected_app_id_for_1c = conn.execute(
-                                "SELECT id FROM nmck_applications WHERE purchase_id=? AND year=? AND onec_num=?",
-                                (sel_id, year, c_1c_sel)).fetchone()
+                            selected_app_id_for_1c = conn.execute("SELECT id FROM nmck_applications WHERE purchase_id=? AND year=? AND onec_num=?", (sel_id, year, c_1c_sel)).fetchone()
                             selected_app_ifo_amounts = {}
                             if selected_app_id_for_1c:
-                                app_ifo_data = conn.execute(
-                                    "SELECT ifo_source, amount FROM nmck_app_ifo_amounts WHERE app_id=?",
-                                    (selected_app_id_for_1c[0],)).fetchall()
+                                app_ifo_data = conn.execute("SELECT ifo_source, amount FROM nmck_app_ifo_amounts WHERE app_id=?", (selected_app_id_for_1c[0],)).fetchall()
                                 selected_app_ifo_amounts = {item[0]: item[1] for item in app_ifo_data}
 
                             new_contract_ifo_amounts = {}
                             for source in selected_sources_for_purchase:
                                 app_def = float(selected_app_ifo_amounts.get(source, 0.0))
-                                new_contract_ifo_amounts[source] = st.number_input(f"{source}", value=None,
-                                                                                   placeholder=f"Из заявки: {fmt_num(app_def)}",
-                                                                                   key=f"new_cnt_ifo_{sel_id}_{year}_{source}_{cur_cnt_cnt}")
+                                new_contract_ifo_amounts[source] = st.number_input(f"{source}", value=None, placeholder=f"Из заявки: {fmt_num(app_def)}", key=f"new_cnt_ifo_{sel_id}_{year}_{source}_{cur_cnt_cnt}")
 
-                            if st.button(f"➕ Добавить контракт ({year})", key=f"btn_add_cnt_{sel_id}_{year}"):
-                                clean_cnt_amounts = {src: (amt if amt is not None else 0.0) for src, amt in
-                                                     new_contract_ifo_amounts.items()}
+                            if st.button(f"➕ Добавить контракт {next_cnt_num} ({year})", key=f"btn_add_cnt_{sel_id}_{year}"):
+                                clean_cnt_amounts = {src: (amt if amt is not None else 0.0) for src, amt in new_contract_ifo_amounts.items()}
                                 total_new_contract_amount = sum(clean_cnt_amounts.values())
                                 if total_new_contract_amount > 0:
-                                    cnt_num_to_save = c_num_input.strip() if c_num_input.strip() else next_cnt_num
                                     cursor = conn.execute(
                                         "INSERT INTO contracts (purchase_id, year, contract_num, onec_num, contract_date, comment) VALUES (?,?,?,?,?,?)",
-                                        (sel_id, year, cnt_num_to_save, c_1c_sel, c_date_val.strftime("%d-%m-%Y"),
-                                         c_comm_val))
+                                        (sel_id, year, next_cnt_num, c_1c_sel, c_date_val.strftime("%d-%m-%Y"), c_comm_val))
                                     new_contract_id = cursor.lastrowid
                                     for ifo_src, amount in clean_cnt_amounts.items():
                                         if amount > 0:
-                                            conn.execute(
-                                                "INSERT INTO contract_ifo_amounts (contract_id, ifo_source, amount) VALUES (?,?,?)",
-                                                (new_contract_id, ifo_src, amount))
+                                            conn.execute("INSERT INTO contract_ifo_amounts (contract_id, ifo_source, amount) VALUES (?,?,?)",
+                                                         (new_contract_id, ifo_src, amount))
                                     conn.commit()
 
                                     st.session_state[cnt_counter_key] += 1
                                     st.rerun()
 
                         st.markdown("---")
-                        st.markdown(
-                            f'<div class="total-summary">ИТОГО СЫГРАНО {year}: {fmt_num(total_played_year)}</div>',
-                            unsafe_allow_html=True)
+                        st.write(f"**ИТОГО СЫГРАНО {year}: {fmt_num(total_played_year)}**")
 
-                        conn.execute(f"UPDATE purchases SET played_{year} = ? WHERE id = ?",
-                                     (total_played_year, sel_id))
+                        conn.execute(f"UPDATE purchases SET played_{year} = ? WHERE id = ?", (total_played_year, sel_id))
                         conn.commit()
                         conn.close()
 
             if st.button("💾 Сохранить контракты", key="save_cnt_btn"):
                 st.success("Контракты сохранены!")
                 st.rerun()
+
+# --- БЛОК БЕЗОПАСНОГО УДАЛЕНИЯ ПОЗИЦИИ ---
+st.divider()
+with st.expander("🗑️ Удаление позиции из реестра"):
+    conn = get_connection()
+    all_purchases_to_delete = conn.execute("SELECT id, name, subdivision FROM purchases").fetchall()
+    conn.close()
+
+    if not all_purchases_to_delete:
+        st.info("Реестр пуст, нечего удалять.")
+    else:
+        delete_options = [f"ID: {p[0]} | {p[1]} ({p[2]})" for p in all_purchases_to_delete]
+        selected_to_delete_str = st.selectbox("Выберите закупку для ПОЛНОГО удаления:", delete_options)
+        del_id = int(selected_to_delete_str.split("ID: ")[1].split(" |")[0])
+
+        st.warning(f"⚠️ Внимание! Вместе с закупкой будут удалены ВСЕ связанные заявки, контракты и ДС.")
+        confirm_del = st.checkbox("Я понимаю, что действие необратимо", key="confirm_del_check")
+
+        if st.button("🔴 Безопасно удалить закупку", disabled=not confirm_del):
+            conn = get_connection()
+            conn.execute("DELETE FROM ds_ifo_amounts WHERE ds_id IN (SELECT id FROM ds_agreements WHERE contract_id IN (SELECT id FROM contracts WHERE purchase_id=?));", (del_id,))
+            conn.execute("DELETE FROM ds_agreements WHERE contract_id IN (SELECT id FROM contracts WHERE purchase_id=?);", (del_id,))
+            conn.execute("DELETE FROM contract_ifo_amounts WHERE contract_id IN (SELECT id FROM contracts WHERE purchase_id=?);", (del_id,))
+            conn.execute("DELETE FROM contracts WHERE purchase_id=?;", (del_id,))
+            conn.execute("DELETE FROM nmck_app_ifo_amounts WHERE app_id IN (SELECT id FROM nmck_applications WHERE purchase_id=?);", (del_id,))
+            conn.execute("DELETE FROM nmck_applications WHERE purchase_id=?;", (del_id,))
+            conn.execute("DELETE FROM budget_breakdown WHERE purchase_id=?;", (del_id,))
+            conn.execute("DELETE FROM purchases WHERE id=?;", (del_id,))
+            conn.commit()
+            conn.close()
+            st.success("Позиция и все связанные данные успешно удалены!")
+            st.rerun()
