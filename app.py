@@ -76,7 +76,8 @@ SUBDIVISIONS = [
 
 KOSGU_LIST = ["221", "222", "223", "224", "225", "226", "227", "228", "310", "341", "342", "343", "344", "345", "346", "349"]
 
-BASIS_LIST = ["п. 4 44-ФЗ", "п. 9 44-ФЗ", "п. 28 44-ФЗ", "44-ФЗ", "223-ФЗ"]
+# Точный порядок оснований:
+BASIS_LIST = ["44-ФЗ", "223-ФЗ", "п. 4 44-ФЗ", "п. 28 44-ФЗ", "п. 9 44-ФЗ"]
 
 
 # --- ФУНКЦИИ ФОРМАТИРОВАНИЯ ---
@@ -339,13 +340,13 @@ if st.sidebar.button("📸 Сделать бэкап прямо сейчас"):
 
 st.title("📋 Реестр закупок")
 
-# --- ФОРМА ВВОДА (БЕЗ номера предложения и номера план-графика) ---
+# --- ФОРМА ВВОДА (с 2026 года) ---
 with st.expander("➕ Добавить новую позицию", expanded=True):
     with st.form("new_entry", clear_on_submit=True):
         row1 = st.columns([2, 3, 1, 2])
         sub = row1[0].selectbox("Подразделение", SUBDIVISIONS)
         name = row1[1].text_input("Наименование")
-        y_place = row1[2].selectbox("Год размещения", list(range(2027, 2032)))
+        y_place = row1[2].selectbox("Год размещения", list(range(2026, 2032)))
 
         available_ifo = get_all_ifo_sources()
         ifo_main_selected = row1[3].multiselect("ИФО (источники)", available_ifo, default=[])
@@ -561,7 +562,7 @@ if not df.empty:
 
         st.success(f"📌 Выбрана позиция: **{selected_name}** (ID: {sel_id}, ИФО: {', '.join(selected_sources_for_purchase)})")
 
-        # --- БЛОК 1: РАСПРЕДЕЛЕНИЕ БЮДЖЕТА ПО ИСТОЧНИКАМ (ИФО) С РАЗДЕЛЕНИЕМ РАЗРЯДОВ ---
+        # --- БЛОК 1: РАСПРЕДЕЛЕНИЕ БЮДЖЕТА ПО ИСТОЧНИКАМ (ИФО) ---
         with st.expander("💰 Распределение бюджета по источникам (ИФО)", expanded=True):
             years = [2027, 2028]
             cols = st.columns(2)
