@@ -98,10 +98,10 @@ def capitalize_first_letter(text):
 
 def fmt_num(val):
     """Форматирует число с разделением тысяч ПРОБЕЛОМ"""
-    if val is None or pd.isna(val):
+    if val is None or pd.isna(val) or val == "":
         return "0"
     try:
-        val_float = float(val)
+        val_float = float(str(val).replace(" ", "").replace(",", "."))
         if val_float.is_integer():
             return f"{int(val_float):,}".replace(",", " ")
         else:
@@ -112,7 +112,7 @@ def fmt_num(val):
 
 def parse_float(val):
     """Безопасный перевод строки с пробелами в число float"""
-    if val is None or pd.isna(val):
+    if val is None or pd.isna(val) or val == "":
         return 0.0
     s = str(val).replace(" ", "").replace(",", ".")
     try:
@@ -289,12 +289,10 @@ if "last_auto_backup_time" not in st.session_state:
     st.session_state.last_auto_backup_time = datetime.now()
     create_backup("init")
 
-# Каждые 30 минут (1800 секунд) делаем фоновый бэкап
 if (datetime.now() - st.session_state.last_auto_backup_time).total_seconds() > 1800:
     create_backup("timed_30min")
     st.session_state.last_auto_backup_time = datetime.now()
 
-# Проверяем ежедневный бэкап в 00:00 (или первый запуск нового дня)
 today_str = datetime.now().strftime("%Y-%m-%d")
 daily_marker_file = os.path.join(BACKUP_DIR, f"daily_marker_{today_str}.txt")
 if not os.path.exists(daily_marker_file):
@@ -341,7 +339,7 @@ if st.sidebar.button("📸 Сделать бэкап прямо сейчас"):
 
 st.title("📋 Реестр закупок")
 
-# --- ФОРМА ВВОДА ---
+# --- ФОРМА ВВОДА (БЕЗ номера предложения и номера план-графика) ---
 with st.expander("➕ Добавить новую позицию", expanded=True):
     with st.form("new_entry", clear_on_submit=True):
         row1 = st.columns([2, 3, 1, 2])
@@ -358,10 +356,6 @@ with st.expander("➕ Добавить новую позицию", expanded=True
         okpd_raw = row2[0].text_input("ОКПД2 (вводите цифры)", placeholder="Напр: 123456")
         kosgu = row2[1].selectbox("КОСГУ", KOSGU_LIST)
         basis = row2[2].selectbox("Основание", BASIS_LIST)
-
-        row3 = st.columns(2)
-        req_n = row3[0].text_input("Номер предложения на закупку")
-        graph_n = row3[1].text_input("Номер план-графика")
 
         submit_btn = st.form_submit_button("Сохранить позицию")
 
@@ -388,8 +382,8 @@ with st.expander("➕ Добавить новую позицию", expanded=True
                 conn.execute('''INSERT INTO purchases
                                 (subdivision, name, year_placement, ifo, okpd2, kosgu, basis, request_num, plan_graph_num,
                                  plan_2027, plan_2028, nmck_2027, nmck_2028, played_2027, played_2028, rem_2027, rem_2028)
-                                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 0, 0, 0, 0, 0, 0)''',
-                             (sub, name_fixed, y_place, ", ".join(final_ifo_list), okpd_fixed, kosgu, basis, req_n, graph_n))
+                                VALUES (?, ?, ?, ?, ?, ?, ?, '', '', 0, 0, 0, 0, 0, 0, 0, 0)''',
+                             (sub, name_fixed, y_place, ", ".join(final_ifo_list), okpd_fixed, kosgu, basis))
                 conn.commit()
                 conn.close()
                 create_backup("after_add")
@@ -442,7 +436,6 @@ if not df.empty:
         "played_2027", "played_2028", "rem_2027", "rem_2028"
     ]].copy()
 
-    # Преобразуем ИФО в список для поддержки Multiselect в редакторе таблицы
     display_df['ifo'] = display_df['ifo'].apply(lambda x: [s.strip() for s in str(x).split(",") if s.strip()] if x else [])
 
     for num_col in ["plan_2027", "plan_2028", "nmck_2027", "nmck_2028", "played_2027", "played_2028", "rem_2027", "rem_2028"]:
@@ -457,7 +450,6 @@ if not df.empty:
         "Остаток 2027 год", "Остаток 2028 год"
     ]
 
-    # НАСТРОЙКА КОЛОНОК: Выпадающие списки в таблице (включая ИФО)
     all_ifo_options = [s for s in get_all_ifo_sources() if s != "Прочее"]
 
     column_configuration = {
@@ -493,7 +485,6 @@ if not df.empty:
             for _, row in edited_df.iterrows():
                 updated_name = capitalize_first_letter(row["Наименование"])
 
-                # Форматирование ИФО обратно в строку
                 raw_ifo_val = row["ИФО"]
                 if isinstance(raw_ifo_val, list):
                     ifo_str_val = ", ".join(raw_ifo_val)
@@ -525,7 +516,6 @@ if not df.empty:
             st.success("Все изменения в базе сохранены!")
 
     with btn_col2:
-        # КНОПКА СКАЧИВАНИЯ В EXCEL С РАСЧЕРЧЕННЫМИ ПОЛЯМИ
         excel_data = generate_excel_with_borders(edited_df)
         st.download_button(
             label="📥 Скачать реестр в Excel (с рамками)",
@@ -571,7 +561,7 @@ if not df.empty:
 
         st.success(f"📌 Выбрана позиция: **{selected_name}** (ID: {sel_id}, ИФО: {', '.join(selected_sources_for_purchase)})")
 
-        # --- БЛОК 1: РАСПРЕДЕЛЕНИЕ БЮДЖЕТА ПО ИСТОЧНИКАМ (ИФО) ---
+        # --- БЛОК 1: РАСПРЕДЕЛЕНИЕ БЮДЖЕТА ПО ИСТОЧНИКАМ (ИФО) С РАЗДЕЛЕНИЕМ РАЗРЯДОВ ---
         with st.expander("💰 Распределение бюджета по источникам (ИФО)", expanded=True):
             years = [2027, 2028]
             cols = st.columns(2)
@@ -588,10 +578,21 @@ if not df.empty:
                                 (sel_id, year, source)).fetchone()
                             conn.close()
 
-                            init_val = float(old_val[0]) if (old_val and old_val[0] > 0) else None
-                            val = st.number_input(f"{source} ({year})", value=init_val, key=f"break_{sel_id}_{year}_{source}")
-                            val_clean = val if val is not None else 0.0
+                            init_float = float(old_val[0]) if (old_val and old_val[0] > 0) else 0.0
+                            init_str = fmt_num(init_float) if init_float > 0 else ""
+
+                            val_raw = st.text_input(
+                                f"{source} ({year})",
+                                value=init_str,
+                                placeholder="0",
+                                key=f"break_{sel_id}_{year}_{source}"
+                            )
+
+                            val_clean = parse_float(val_raw)
                             total_for_year += val_clean
+
+                            if val_clean > 0:
+                                st.caption(f"Сумма с разрядами: **{fmt_num(val_clean)}**")
 
                             conn = get_connection()
                             conn.execute("DELETE FROM budget_breakdown WHERE purchase_id=? AND year=? AND ifo_name=?",
