@@ -31,15 +31,21 @@ def create_backup(label="auto"):
         print(f"Ошибка бэкапа: {e}")
         return False
 
-# --- CSS СТИЛИ: Принудительное центрирование Главного реестра ---
+# --- CSS СТИЛИ: Центрирование текста без поломки горизонтального скролла ---
 st.markdown("""
 <style>
-[data-testid="stDataEditor"] *, 
-[data-testid="stDataFrame"] *,
-div[data-testid="stDataEditor"] div,
-div[data-testid="stDataFrame"] div {
+/* Центрируем текст внутри ячеек и заголовков таблицы, не ломая flexbox контейнеры и скролл */
+[data-testid="stDataEditor"] td,
+[data-testid="stDataEditor"] th,
+[data-testid="stDataFrame"] td,
+[data-testid="stDataFrame"] th {
     text-align: center !important;
-    justify-content: center !important;
+}
+
+/* Разрешаем таблице свободно тянуться на всю реальную ширину колонок */
+[data-testid="stDataEditor"] > div,
+[data-testid="stDataFrame"] > div {
+    width: 100% !important;
 }
 </style>
 """, unsafe_allow_html=True)
@@ -453,21 +459,26 @@ if not df.empty:
 
     all_ifo_options = [s for s in get_all_ifo_sources() if s != "Прочее"]
 
+    # Настройка колонок с фиксированной и комфортной шириной
     column_configuration = {
         "ID": st.column_config.NumberColumn("ID", width="small"),
-        "Подразделение": st.column_config.SelectboxColumn("Подразделение", options=SUBDIVISIONS),
-        "ИФО": st.column_config.MultiselectColumn("ИФО", options=all_ifo_options),
+        "Подразделение": st.column_config.SelectboxColumn("Подразделение", options=SUBDIVISIONS, width="medium"),
+        "Наименование": st.column_config.TextColumn("Наименование", width="large"),
+        "Год размещения": st.column_config.NumberColumn("Год размещения", width="small", format="%d"),
+        "ИФО": st.column_config.MultiselectColumn("ИФО", options=all_ifo_options, width="medium"),
+        "ОКПД2": st.column_config.TextColumn("ОКПД2", width="small"),
         "КОСГУ": st.column_config.SelectboxColumn("КОСГУ", options=KOSGU_LIST, width="small"),
         "Основание": st.column_config.SelectboxColumn("Основание", options=BASIS_LIST, width="small"),
-        "Год размещения": st.column_config.NumberColumn("Год размещения", width="small", format="%d"),
-        "Планируемая сумма; 2027 год": st.column_config.TextColumn("Планируемая сумма; 2027 год"),
-        "Планируемая сумма; 2028 год": st.column_config.TextColumn("Планируемая сумма; 2028 год"),
-        "Сумма по заявкам НМЦК 2027 год": st.column_config.TextColumn("Сумма по заявкам НМЦК 2027 год"),
-        "Сумма по заявкам НМЦК 2028 год": st.column_config.TextColumn("Сумма по заявкам НМЦК 2028 год"),
-        "Сумма сыгранная 2027 год": st.column_config.TextColumn("Сумма сыгранная 2027 год"),
-        "Сумма сыгранная 2028 год": st.column_config.TextColumn("Сумма сыгранная 2028 год"),
-        "Остаток 2027 год": st.column_config.TextColumn("Остаток 2027 год"),
-        "Остаток 2028 год": st.column_config.TextColumn("Остаток 2028 год"),
+        "Номер предложения на закупку": st.column_config.TextColumn("Номер предложения на закупку", width="medium"),
+        "Номер план-графика": st.column_config.TextColumn("Номер план-графика", width="medium"),
+        "Планируемая сумма; 2027 год": st.column_config.TextColumn("Планируемая сумма; 2027 год", width="medium"),
+        "Планируемая сумма; 2028 год": st.column_config.TextColumn("Планируемая сумма; 2028 год", width="medium"),
+        "Сумма по заявкам НМЦК 2027 год": st.column_config.TextColumn("Сумма по заявкам НМЦК 2027 год", width="medium"),
+        "Сумма по заявкам НМЦК 2028 год": st.column_config.TextColumn("Сумма по заявкам НМЦК 2028 год", width="medium"),
+        "Сумма сыгранная 2027 год": st.column_config.TextColumn("Сумма сыгранная 2027 год", width="medium"),
+        "Сумма сыгранная 2028 год": st.column_config.TextColumn("Сумма сыгранная 2028 год", width="medium"),
+        "Остаток 2027 год": st.column_config.TextColumn("Остаток 2027 год", width="medium"),
+        "Остаток 2028 год": st.column_config.TextColumn("Остаток 2028 год", width="medium"),
     }
 
     edited_df = st.data_editor(
