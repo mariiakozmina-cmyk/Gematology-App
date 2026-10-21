@@ -129,11 +129,11 @@ def parse_float(val):
 
 
 # --- ВЫГРУЗКА В EXCEL С РАСЧЕРЧЕННЫМИ ПОЛЯМИ И СЕТКОЙ ---
-def generate_excel_with_borders(df_to_export):
+def generate_excel_with_borders(df_to_export, sheet_name="Реестр закупок"):
     output = io.BytesIO()
     wb = openpyxl.Workbook()
     ws = wb.active
-    ws.title = "Реестр закупок"
+    ws.title = sheet_name
 
     # Принудительно включаем отображение сетки
     ws.views.sheetView[0].showGridLines = True
@@ -323,6 +323,14 @@ def get_all_ifo_sources():
     return all_src
 
 
+def get_custom_ifo_sources():
+    """Возвращает только пользовательские источники из базы данных (без базовых)"""
+    conn = get_connection()
+    custom_sources = [row[0] for row in conn.execute("SELECT source_name FROM funding_sources ORDER BY source_name").fetchall()]
+    conn.close()
+    return custom_sources
+
+
 # --- SIDEBAR: УПРАВЛЕНИЕ АРХИВОМ СОХРАНЕНИЙ ПО ДНЯМ ---
 st.sidebar.header("🕹️ Архив сохранений (Бэкапы)")
 st.sidebar.caption("Автосохранение каждые 30 мин. + ежедневные копии.")
@@ -396,6 +404,23 @@ with st.expander("➕ Добавить новую позицию", expanded=True
                 create_backup("after_add")
                 st.success(f"Добавлено! Сохранено: {name_fixed}")
                 st.rerun()
+
+    # --- УДАЛЕНИЕ ОШИБОЧНЫХ ИСТОЧНИКОВ ИФО ИЗ СПРАВОЧНИКА ---
+    current_custom_sources = get_custom_ifo_sources()
+    if current_custom_sources:
+        with st.expander("🗑️ Удалить ошибочные/тестовые источники ИФО из списка", expanded=False):
+            st.caption("Здесь можно навсегда удалить тестовые или ненужные источники из базы (базовые ВБ, ГЗ, ОМС, Субсидия не удаляются).")
+            for cs in current_custom_sources:
+                c_del1, c_del2 = st.columns([4, 1])
+                c_del1.write(f"• **{cs}**")
+                if c_del2.button("❌ Удалить", key=f"del_custom_ifo_{cs}"):
+                    conn = get_connection()
+                    conn.execute("DELETE FROM funding_sources WHERE source_name=?", (cs,))
+                    conn.commit()
+                    conn.close()
+                    create_backup("after_del_custom_ifo")
+                    st.success(f"Источник '{cs}' удален из выпадающего списка!")
+                    st.rerun()
 
 # --- ОСНОВНАЯ ТАБЛИЦА ---
 conn = get_connection()
@@ -983,6 +1008,179 @@ if not df.empty:
                 create_backup("after_save_contracts")
                 st.success("Контракты сохранены!")
                 st.rerun()
+
+# --- БЛОК: СФОРМИРОВАТЬ ОТЧЕТ ---
+st.divider()
+with st.expander("📊 Сформировать отчет", expanded=False):
+    st.markdown("Здесь вы можете сформировать сводный финансовый отчет по подразделению и экспортировать его в Excel.")
+
+    report_type = st.radio(
+        "Выберите тип отчета:",
+        ["1. Отчет по подразделению (общие суммы)", "2. Отчет по подразделению и источнику финансирования (ИФО)"],
+        horizontal=True
+    )
+
+    r_col1, r_col2 = st.columns(2)
+    selected_rep_sub = r_col1.selectbox("Выберите подразделение для отчета:", SUBDIVISIONS, key="rep_sub_select")
+
+    # ТИП 1: ПО ПОДРАЗДЕЛЕНИЮ
+    if report_type.startswith("1."):
+        if st.button("📈 Сформировать отчет по подразделению", key="btn_gen_report_sub"):
+            st.session_state["show_rep_sub"] = selected_rep_sub
+
+        if st.session_state.get("show_rep_sub") == selected_rep_sub:
+            sub_df = df[df['subdivision'] == selected_rep_sub].copy()
+
+            if sub_df.empty:
+                st.info(f"По подразделению **{selected_rep_sub}** пока нет ни одной позиции в реестре.")
+            else:
+                p27 = sub_df['plan_2027'].sum()
+                p28 = sub_df['plan_2028'].sum()
+                n27 = sub_df['nmck_2027'].sum()
+                n28 = sub_df['nmck_2028'].sum()
+                s27 = sub_df['played_2027'].sum()
+                s28 = sub_df['played_2028'].sum()
+                r27 = p27 - n27 - s27
+                r28 = p28 - n28 - s28
+
+                tot_p = p27 + p28
+                tot_n = n27 + n28
+                tot_s = s27 + s28
+                tot_r = r27 + r28
+
+                st.markdown(f"#### 📑 Сводные данные: {selected_rep_sub}")
+                st.caption(f"Всего позиций в реестре: {len(sub_df)}")
+
+                rep_summary_data = [
+                    {"Год": "2027 год", "Планируемая сумма": fmt_num(p27), "Сумма по заявкам НМЦК": fmt_num(n27), "Сыгранная сумма": fmt_num(s27), "Остаток": fmt_num(r27)},
+                    {"Год": "2028 год", "Планируемая сумма": fmt_num(p28), "Сумма по заявкам НМЦК": fmt_num(n28), "Сыгранная сумма": fmt_num(s28), "Остаток": fmt_num(r28)},
+                    {"Год": "ИТОГО", "Планируемая сумма": fmt_num(tot_p), "Сумма по заявкам НМЦК": fmt_num(tot_n), "Сыгранная сумма": fmt_num(tot_s), "Остаток": fmt_num(tot_r)}
+                ]
+                rep_summary_df = pd.DataFrame(rep_summary_data)
+                st.dataframe(rep_summary_df, use_container_width=True, hide_index=True)
+
+                st.markdown("##### Детализация по позициям подразделения:")
+                rep_detail_df = sub_df[[
+                    "id", "name", "year_placement", "ifo", "okpd2", "kosgu", "basis",
+                    "plan_2027", "nmck_2027", "played_2027",
+                    "plan_2028", "nmck_2028", "played_2028"
+                ]].copy()
+                rep_detail_df['rem_2027'] = rep_detail_df['plan_2027'] - rep_detail_df['nmck_2027'] - rep_detail_df['played_2027']
+                rep_detail_df['rem_2028'] = rep_detail_df['plan_2028'] - rep_detail_df['nmck_2028'] - rep_detail_df['played_2028']
+
+                for nc in ["plan_2027", "nmck_2027", "played_2027", "rem_2027", "plan_2028", "nmck_2028", "played_2028", "rem_2028"]:
+                    rep_detail_df[nc] = rep_detail_df[nc].apply(fmt_num)
+
+                rep_detail_df.columns = [
+                    "ID", "Наименование", "Год размещения", "ИФО", "ОКПД2", "КОСГУ", "Основание",
+                    "План 2027", "НМЦК 2027", "Сыграно 2027", "Остаток 2027",
+                    "План 2028", "НМЦК 2028", "Сыграно 2028", "Остаток 2028"
+                ]
+                st.dataframe(rep_detail_df, use_container_width=True, hide_index=True)
+
+                rep_excel_data = generate_excel_with_borders(rep_detail_df, sheet_name="Отчет по подразделению")
+                st.download_button(
+                    label=f"📥 Скачать отчет '{selected_rep_sub}' в Excel (с сеткой)",
+                    data=rep_excel_data,
+                    file_name=f"Отчет_{selected_rep_sub}_{datetime.now().strftime('%Y-%m-%d')}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    key="dl_rep_sub_excel"
+                )
+
+    # ТИП 2: ПО ПОДРАЗДЕЛЕНИЮ И ИФО
+    else:
+        all_ifo_for_rep = [s for s in get_all_ifo_sources() if s != "Прочее"]
+        selected_rep_ifo = r_col2.selectbox("Выберите источник финансирования (ИФО):", all_ifo_for_rep, key="rep_ifo_select")
+
+        if st.button("📈 Сформировать отчет по подразделению и ИФО", key="btn_gen_report_ifo"):
+            st.session_state["show_rep_ifo_key"] = f"{selected_rep_sub}_{selected_rep_ifo}"
+
+        if st.session_state.get("show_rep_ifo_key") == f"{selected_rep_sub}_{selected_rep_ifo}":
+            sub_df = df[df['subdivision'] == selected_rep_sub].copy()
+
+            if sub_df.empty:
+                st.info(f"По подразделению **{selected_rep_sub}** пока нет позиций.")
+            else:
+                sub_ids = list(sub_df['id'].unique())
+                conn = get_connection()
+
+                # Функция расчета сумм по конкретному источнику ИФО для списка ID закупок
+                def calc_ifo_sums_for_year(year_val, ifo_val):
+                    if not sub_ids:
+                        return 0.0, 0.0, 0.0, 0.0
+                    id_placeholders = ",".join("?" for _ in sub_ids)
+
+                    # 1. План по ИФО (из budget_breakdown)
+                    p_query = f"SELECT SUM(amount) FROM budget_breakdown WHERE purchase_id IN ({id_placeholders}) AND year=? AND ifo_name=?"
+                    plan_val = conn.execute(p_query, (*sub_ids, year_val, ifo_val)).fetchone()[0] or 0.0
+
+                    # 2. НМЦК по ИФО (из nmck_app_ifo_amounts)
+                    n_query = f"""
+                        SELECT SUM(t2.amount)
+                        FROM nmck_applications t1
+                        JOIN nmck_app_ifo_amounts t2 ON t1.id = t2.app_id
+                        WHERE t1.purchase_id IN ({id_placeholders}) AND t1.year=? AND t2.ifo_source=?
+                    """
+                    nmck_val = conn.execute(n_query, (*sub_ids, year_val, ifo_val)).fetchone()[0] or 0.0
+
+                    # 3. Сыграно по ИФО (учитывая последнее ДС)
+                    c_query = f"SELECT id FROM contracts WHERE purchase_id IN ({id_placeholders}) AND year=?"
+                    contracts_list = conn.execute(c_query, (*sub_ids, year_val)).fetchall()
+                    played_val = 0.0
+
+                    for (c_id,) in contracts_list:
+                        last_ds = conn.execute("SELECT id FROM ds_agreements WHERE contract_id=? ORDER BY id DESC LIMIT 1", (c_id,)).fetchone()
+                        if last_ds:
+                            ds_amt = conn.execute("SELECT amount FROM ds_ifo_amounts WHERE ds_id=? AND ifo_source=?", (last_ds[0], ifo_val)).fetchone()
+                            if ds_amt and ds_amt[0] is not None:
+                                played_val += float(ds_amt[0])
+                            else:
+                                c_amt = conn.execute("SELECT amount FROM contract_ifo_amounts WHERE contract_id=? AND ifo_source=?", (c_id, ifo_val)).fetchone()
+                                if c_amt and c_amt[0] is not None:
+                                    played_val += float(c_amt[0])
+                        else:
+                            c_amt = conn.execute("SELECT amount FROM contract_ifo_amounts WHERE contract_id=? AND ifo_source=?", (c_id, ifo_val)).fetchone()
+                            if c_amt and c_amt[0] is not None:
+                                played_val += float(c_amt[0])
+
+                    rem_val = plan_val - nmck_val - played_val
+                    return plan_val, nmck_val, played_val, rem_val
+
+                plan_27, nmck_27, played_27, rem_27 = calc_ifo_sums_for_year(2027, selected_rep_ifo)
+                plan_28, nmck_28, played_28, rem_28 = calc_ifo_sums_for_year(2028, selected_rep_ifo)
+                conn.close()
+
+                tot_plan = plan_27 + plan_28
+                tot_nmck = nmck_27 + nmck_28
+                tot_played = played_27 + played_28
+                tot_rem = rem_27 + rem_28
+
+                st.markdown(f"#### 📑 Сводные данные: {selected_rep_sub} | Источник: **{selected_rep_ifo}**")
+
+                ifo_rep_summary_data = [
+                    {"Год": "2027 год", "Источник ИФО": selected_rep_ifo, "Планируемая сумма": fmt_num(plan_27), "Сумма по заявкам НМЦК": fmt_num(nmck_27), "Сыгранная сумма": fmt_num(played_27), "Остаток": fmt_num(rem_27)},
+                    {"Год": "2028 год", "Источник ИФО": selected_rep_ifo, "Планируемая сумма": fmt_num(plan_28), "Сумма по заявкам НМЦК": fmt_num(nmck_28), "Сыгранная сумма": fmt_num(played_28), "Остаток": fmt_num(rem_28)},
+                    {"Год": "ИТОГО", "Источник ИФО": selected_rep_ifo, "Планируемая сумма": fmt_num(tot_plan), "Сумма по заявкам НМЦК": fmt_num(tot_nmck), "Сыгранная сумма": fmt_num(tot_played), "Остаток": fmt_num(tot_rem)}
+                ]
+                ifo_rep_summary_df = pd.DataFrame(ifo_rep_summary_data)
+                st.dataframe(ifo_rep_summary_df, use_container_width=True, hide_index=True)
+
+                # Позиции, где задействован этот ИФО
+                matching_ifo_df = sub_df[sub_df['ifo'].str.contains(selected_rep_ifo, case=False, na=False)].copy()
+                if not matching_ifo_df.empty:
+                    st.markdown(f"##### Позиции подразделения, где заявлен источник '{selected_rep_ifo}':")
+                    m_disp = matching_ifo_df[["id", "name", "year_placement", "okpd2", "kosgu", "basis"]].copy()
+                    m_disp.columns = ["ID", "Наименование", "Год размещения", "ОКПД2", "КОСГУ", "Основание"]
+                    st.dataframe(m_disp, use_container_width=True, hide_index=True)
+
+                ifo_excel_data = generate_excel_with_borders(ifo_rep_summary_df, sheet_name=f"Отчет {selected_rep_ifo}")
+                st.download_button(
+                    label=f"📥 Скачать отчет '{selected_rep_sub} - {selected_rep_ifo}' в Excel",
+                    data=ifo_excel_data,
+                    file_name=f"Отчет_{selected_rep_sub}_{selected_rep_ifo}_{datetime.now().strftime('%Y-%m-%d')}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    key="dl_rep_ifo_excel"
+                )
 
 # --- БЛОК БЕЗОПАСНОГО УДАЛЕНИЯ ПОЗИЦИИ ---
 st.divider()
