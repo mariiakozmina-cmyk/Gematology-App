@@ -405,22 +405,22 @@ with st.expander("➕ Добавить новую позицию", expanded=True
                 st.success(f"Добавлено! Сохранено: {name_fixed}")
                 st.rerun()
 
-    # --- УДАЛЕНИЕ ОШИБОЧНЫХ ИСТОЧНИКОВ ИФО ИЗ СПРАВОЧНИКА ---
+    # --- ВИДИМЫЙ И ПОНЯТНЫЙ БЛОК УДАЛЕНИЯ ПОЛЬЗОВАТЕЛЬСКИХ ИСТОЧНИКОВ ИФО ---
     current_custom_sources = get_custom_ifo_sources()
     if current_custom_sources:
-        with st.expander("🗑️ Удалить ошибочные/тестовые источники ИФО из списка", expanded=False):
-            st.caption("Здесь можно навсегда удалить тестовые или ненужные источники из базы (базовые ВБ, ГЗ, ОМС, Субсидия не удаляются).")
-            for cs in current_custom_sources:
-                c_del1, c_del2 = st.columns([4, 1])
-                c_del1.write(f"• **{cs}**")
-                if c_del2.button("❌ Удалить", key=f"del_custom_ifo_{cs}"):
-                    conn = get_connection()
-                    conn.execute("DELETE FROM funding_sources WHERE source_name=?", (cs,))
-                    conn.commit()
-                    conn.close()
-                    create_backup("after_del_custom_ifo")
-                    st.success(f"Источник '{cs}' удален из выпадающего списка!")
-                    st.rerun()
+        st.markdown("#### 🗑️ Удаление личных/тестовых источников ИФО из выпадающего списка")
+        st.caption("Нажмите ❌ напротив ошибочной записи (например, тестовой), чтобы навсегда удалить её из списка:")
+        for cs in current_custom_sources:
+            c_del1, c_del2 = st.columns([4, 1])
+            c_del1.markdown(f"• **{cs}**")
+            if c_del2.button("❌ Удалить из списка", key=f"del_custom_ifo_{cs}"):
+                conn = get_connection()
+                conn.execute("DELETE FROM funding_sources WHERE source_name=?", (cs,))
+                conn.commit()
+                conn.close()
+                create_backup("after_del_custom_ifo")
+                st.success(f"Источник '{cs}' успешно удален!")
+                st.rerun()
 
 # --- ОСНОВНАЯ ТАБЛИЦА ---
 conn = get_connection()
@@ -650,7 +650,7 @@ if not df.empty:
                 st.rerun()
 
         # --- БЛОК 2: СУММА ПО ЗАЯВКАМ НМЦК ---
-        with st.expander("📝 Сумма по заявкам НМЦК", expanded=False):
+        with st.expander("📝 Сумма по заявкам НМЦК", expanded=True):
             nmck_years = [2027, 2028]
             nmck_cols = st.columns(2)
 
@@ -700,6 +700,7 @@ if not df.empty:
                                         conn.execute("DELETE FROM nmck_applications WHERE id=?", (app_id,))
                                         conn.execute("DELETE FROM nmck_app_ifo_amounts WHERE app_id=?", (app_id,))
                                         conn.commit()
+                                        conn.close()
                                         create_backup("after_delete_app")
                                         st.rerun()
 
@@ -718,12 +719,14 @@ if not df.empty:
                                                     clean_amt = amount if amount is not None else 0.0
                                                     conn.execute("UPDATE nmck_app_ifo_amounts SET amount=? WHERE app_id=? AND ifo_source=?", (clean_amt, app_id, ifo_src))
                                                 conn.commit()
+                                                conn.close()
                                                 create_backup("after_edit_app")
                                                 st.session_state[f"editing_nmck_{app_id}"] = False
                                                 st.rerun()
 
-                        st.caption("Добавить новую заявку:")
+                        conn.close()
 
+                        st.caption("Добавить новую заявку:")
                         app_counter_key = f"app_cnt_{sel_id}_{year}"
                         if app_counter_key not in st.session_state:
                             st.session_state[app_counter_key] = 0
@@ -733,6 +736,7 @@ if not df.empty:
                         st.markdown("**Суммы по источникам:**")
                         new_app_ifo_amounts = {}
 
+                        conn = get_connection()
                         for source in selected_sources_for_purchase:
                             budget_ifo_val = conn.execute(
                                 "SELECT amount FROM budget_breakdown WHERE purchase_id=? AND year=? AND ifo_name=?",
@@ -752,38 +756,37 @@ if not df.empty:
                                 placeholder=f"Остаток: {fmt_num(rem_avail)}",
                                 key=f"new_app_ifo_{sel_id}_{year}_{source}_{cur_app_cnt}"
                             )
+                        conn.close()
 
-                        if st.button(f"➕ Добавить заявку ({year})", key=f"btn_add_nmck_app_{sel_id}_{year}"):
+                        if st.button(f"➕ Сохранить заявку ({year})", key=f"btn_add_nmck_app_{sel_id}_{year}"):
                             clean_amounts = {src: (amt if amt is not None else 0.0) for src, amt in new_app_ifo_amounts.items()}
-                            total_new_app_amount = sum(clean_amounts.values())
-                            if total_new_app_amount > 0:
-                                cursor = conn.execute("INSERT INTO nmck_applications (purchase_id, year, onec_num) VALUES (?,?,?)",
-                                                     (sel_id, year, new_onec))
-                                new_app_id = cursor.lastrowid
-                                for ifo_src, amount in clean_amounts.items():
-                                    if amount > 0:
-                                        conn.execute("INSERT INTO nmck_app_ifo_amounts (app_id, ifo_source, amount) VALUES (?,?,?)",
-                                                     (new_app_id, ifo_src, amount))
-                                conn.commit()
-                                create_backup("after_add_app")
+                            
+                            # Убрано жёсткое условие total > 0, чтобы можно было сохранять любые заявки без ошибок
+                            conn = get_connection()
+                            cursor = conn.execute("INSERT INTO nmck_applications (purchase_id, year, onec_num) VALUES (?,?,?)",
+                                                 (sel_id, year, new_onec))
+                            new_app_id = cursor.lastrowid
+                            for ifo_src, amount in clean_amounts.items():
+                                conn.execute("INSERT INTO nmck_app_ifo_amounts (app_id, ifo_source, amount) VALUES (?,?,?)",
+                                             (new_app_id, ifo_src, amount))
+                            conn.commit()
+                            conn.close()
+                            create_backup("after_add_app")
 
-                                st.session_state[app_counter_key] += 1
-                                st.rerun()
+                            st.session_state[app_counter_key] += 1
+                            st.success(f"Заявка {new_onec} успешно сохранена!")
+                            st.rerun()
 
                         st.markdown(f"---")
                         st.write(f"**ИТОГО НМЦК {year}: {fmt_num(total_nmck_year)}**")
 
+                        conn = get_connection()
                         conn.execute(f"UPDATE purchases SET nmck_{year} = ? WHERE id = ?", (total_nmck_year, sel_id))
                         conn.commit()
                         conn.close()
 
-            if st.button("💾 Сохранить заявки", key="save_apps_btn"):
-                create_backup("after_save_apps")
-                st.success("Заявки сохранены!")
-                st.rerun()
-
         # --- БЛОК 3: СУММА СЫГРАННАЯ (ПОСЛЕДНЕЕ ДС) ---
-        with st.expander("🤝 Контракты (Сумма сыгранная и ДС)", expanded=False):
+        with st.expander("🤝 Контракты (Сумма сыгранная и ДС)", expanded=True):
             cnt_years = [2027, 2028]
             cnt_cols = st.columns(2)
 
@@ -850,6 +853,7 @@ if not df.empty:
                                     conn.execute("DELETE FROM ds_agreements WHERE contract_id=?", (contract_id,))
                                     conn.execute("DELETE FROM ds_ifo_amounts WHERE ds_id IN (SELECT id FROM ds_agreements WHERE contract_id=?);", (contract_id,))
                                     conn.commit()
+                                    conn.close()
                                     create_backup("after_delete_contract")
                                     st.rerun()
 
@@ -870,6 +874,7 @@ if not df.empty:
                                                 clean_amt = amount if amount is not None else 0.0
                                                 conn.execute("UPDATE contract_ifo_amounts SET amount=? WHERE contract_id=? AND ifo_source=?", (clean_amt, contract_id, ifo_src))
                                             conn.commit()
+                                            conn.close()
                                             create_backup("after_edit_contract")
                                             st.session_state[f"editing_cnt_{contract_id}"] = False
                                             st.rerun()
@@ -896,6 +901,7 @@ if not df.empty:
                                                 conn.execute("DELETE FROM ds_agreements WHERE id=?", (ds_rec_id,))
                                                 conn.execute("DELETE FROM ds_ifo_amounts WHERE ds_id=?", (ds_rec_id,))
                                                 conn.commit()
+                                                conn.close()
                                                 create_backup("after_delete_ds")
                                                 st.rerun()
 
@@ -916,6 +922,7 @@ if not df.empty:
                                                             clean_amt = amount if amount is not None else 0.0
                                                             conn.execute("UPDATE ds_ifo_amounts SET amount=? WHERE ds_id=? AND ifo_source=?", (clean_amt, ds_rec_id, ifo_src))
                                                         conn.commit()
+                                                        conn.close()
                                                         create_backup("after_edit_ds")
                                                         st.session_state[f"editing_ds_{ds_rec_id}"] = False
                                                         st.rerun()
@@ -945,6 +952,7 @@ if not df.empty:
                                             conn.execute("INSERT INTO ds_ifo_amounts (ds_id, ifo_source, amount) VALUES (?,?,?)",
                                                          (new_ds_id, ifo_src, clean_amt))
                                         conn.commit()
+                                        conn.close()
                                         create_backup("after_add_ds")
 
                                         st.session_state[ds_cnt_key] += 1
@@ -979,35 +987,33 @@ if not df.empty:
                                 app_def = float(selected_app_ifo_amounts.get(source, 0.0))
                                 new_contract_ifo_amounts[source] = st.number_input(f"{source}", value=None, placeholder=f"Из заявки: {fmt_num(app_def)}", key=f"new_cnt_ifo_{sel_id}_{year}_{source}_{cur_cnt_cnt}")
 
-                            if st.button(f"➕ Добавить контракт {next_cnt_num} ({year})", key=f"btn_add_cnt_{sel_id}_{year}"):
+                            if st.button(f"➕ Сохранить контракт {next_cnt_num} ({year})", key=f"btn_add_cnt_{sel_id}_{year}"):
                                 clean_cnt_amounts = {src: (amt if amt is not None else 0.0) for src, amt in new_contract_ifo_amounts.items()}
-                                total_new_contract_amount = sum(clean_cnt_amounts.values())
-                                if total_new_contract_amount > 0:
-                                    cursor = conn.execute(
-                                        "INSERT INTO contracts (purchase_id, year, contract_num, onec_num, contract_date, comment) VALUES (?,?,?,?,?,?)",
-                                        (sel_id, year, next_cnt_num, c_1c_sel, c_date_val.strftime("%d-%m-%Y"), c_comm_val))
-                                    new_contract_id = cursor.lastrowid
-                                    for ifo_src, amount in clean_cnt_amounts.items():
-                                        if amount > 0:
-                                            conn.execute("INSERT INTO contract_ifo_amounts (contract_id, ifo_source, amount) VALUES (?,?,?)",
-                                                         (new_contract_id, ifo_src, amount))
-                                    conn.commit()
-                                    create_backup("after_add_contract")
+                                
+                                cursor = conn.execute(
+                                    "INSERT INTO contracts (purchase_id, year, contract_num, onec_num, contract_date, comment) VALUES (?,?,?,?,?,?)",
+                                    (sel_id, year, next_cnt_num, c_1c_sel, c_date_val.strftime("%d-%m-%Y"), c_comm_val))
+                                new_contract_id = cursor.lastrowid
+                                for ifo_src, amount in clean_cnt_amounts.items():
+                                    conn.execute("INSERT INTO contract_ifo_amounts (contract_id, ifo_source, amount) VALUES (?,?,?)",
+                                                 (new_contract_id, ifo_src, amount))
+                                conn.commit()
+                                conn.close()
+                                create_backup("after_add_contract")
 
-                                    st.session_state[cnt_counter_key] += 1
-                                    st.rerun()
+                                st.session_state[cnt_counter_key] += 1
+                                st.success(f"Контракт {next_cnt_num} успешно сохранен!")
+                                st.rerun()
+
+                        conn.close()
 
                         st.markdown("---")
                         st.write(f"**ИТОГО СЫГРАНО {year}: {fmt_num(total_played_year)}**")
 
+                        conn = get_connection()
                         conn.execute(f"UPDATE purchases SET played_{year} = ? WHERE id = ?", (total_played_year, sel_id))
                         conn.commit()
                         conn.close()
-
-            if st.button("💾 Сохранить контракты", key="save_cnt_btn"):
-                create_backup("after_save_contracts")
-                st.success("Контракты сохранены!")
-                st.rerun()
 
 # --- БЛОК: СФОРМИРОВАТЬ ОТЧЕТ ---
 st.divider()
