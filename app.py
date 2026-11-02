@@ -316,7 +316,17 @@ if not os.path.exists(daily_marker_file):
 
 def get_all_ifo_sources():
     """Возвращает ВСЕ базовые, пользовательские и реально записанные в базе источники ИФО"""
-    base_sources = ["ВБ", "ГЗ", "ОМС", "Субсидия"]
+    base_sources = [
+        "ВБ", "ГЗ", "ОМС", "Субсидия",
+        "Субсидия IT",
+        "Субсидия Грант ЦГИМУ",
+        "Субсидия Донорство костного мозга",
+        "Субсидия Капремонты",
+        "Субсидия Награждение доноров",
+        "Субсидия НМИЦ",
+        "Субсидия НМИЦ оборудование",
+        "Субсидия оборудование",
+    ]
     conn = get_connection()
     custom_sources = [row[0] for row in conn.execute("SELECT source_name FROM funding_sources").fetchall() if row[0]]
     
@@ -1145,104 +1155,125 @@ with st.expander("📊 Сформировать отчет", expanded=False):
             if sub_df.empty:
                 st.info(f"По подразделению **{selected_rep_sub}** пока нет позиций.")
             else:
-                # НАДЁЖНЫЙ И УМНЫЙ РАСЧЁТ СУММ ПО КОНКРЕТНОМУ ИФО
-                def calc_ifo_sums_for_year(year_val, ifo_val):
-                    if sub_df.empty:
-                        return 0.0, 0.0, 0.0, 0.0
+                # Расчет строго по подразделению и точному названию ИФО.
+                # Общие суммы не распределяются между несколькими источниками автоматически.
+                report_warnings = set()
+                def exact_ifo_tokens(value):
+                    if value is None or pd.isna(value):
+                        return []
+                    return [part.strip() for part in str(value).split(",") if part.strip()]
 
+                def calc_ifo_sums_for_year(year_val, ifo_val):
                     plan_val = 0.0
                     nmck_val = 0.0
                     played_val = 0.0
-
-                    target = str(ifo_val).strip().lower()
+                    exact_target = str(ifo_val).strip()
                     conn = get_connection()
 
                     for _, row in sub_df.iterrows():
                         p_id = int(row['id'])
-                        p_ifo_str = str(row['ifo'] or '')
-                        p_ifos = [s.strip() for s in p_ifo_str.split(',') if s.strip()]
-
-                        # Проверяем совпадение по ИФО (гибкий поиск без жесткого сопоставления)
-                        is_match = any(target in s.lower() or s.lower() in target for s in p_ifos)
-                        if not is_match:
+                        p_ifos = exact_ifo_tokens(row.get('ifo', ''))
+                        if exact_target not in p_ifos:
                             continue
 
                         p_plan = parse_float(row.get(f'plan_{year_val}', 0))
                         p_nmck = parse_float(row.get(f'nmck_{year_val}', 0))
                         p_played = parse_float(row.get(f'played_{year_val}', 0))
+                        multi_ifo = len(p_ifos) > 1
 
-                        # 1. ПЛАН (budget_breakdown)
+                        # 1. План: только точная строка в budget_breakdown.
                         b_rows = conn.execute(
                             "SELECT ifo_name, amount FROM budget_breakdown WHERE purchase_id=? AND year=?",
                             (p_id, year_val)
                         ).fetchall()
-                        
-                        b_sum = 0.0
-                        for b_name, b_amt in b_rows:
-                            if b_name and (target in str(b_name).strip().lower() or str(b_name).strip().lower() in target):
-                                if b_amt and float(b_amt) > 0:
-                                    b_sum += float(b_amt)
-
-                        if b_sum > 0:
-                            plan_val += b_sum
-                        else:
-                            if len(p_ifos) <= 1:
+                        exact_budget_rows = [
+                            (name, amount) for name, amount in b_rows
+                            if name is not None and str(name).strip() == exact_target
+                        ]
+                        if exact_budget_rows:
+                            plan_val += sum(parse_float(amount) for _, amount in exact_budget_rows)
+                        elif p_plan > 0 and not b_rows:
+                            if len(p_ifos) == 1:
                                 plan_val += p_plan
-                            elif p_plan > 0:
-                                plan_val += p_plan / len(p_ifos)
+                            elif multi_ifo:
+                                report_warnings.add(
+                                    f"План: позиция ID {p_id} содержит несколько ИФО, "
+                                    f"но распределение бюджета по источникам за {year_val} год не заполнено."
+                                )
 
-                        # 2. НМЦК (nmck_app_ifo_amounts)
+                        # 2. НМЦК: используем только точные распределения по ИФО.
                         n_rows = conn.execute(
-                            """SELECT t2.ifo_source, t2.amount 
-                               FROM nmck_applications t1 
-                               JOIN nmck_app_ifo_amounts t2 ON t1.id = t2.app_id 
+                            """SELECT t2.ifo_source, t2.amount
+                               FROM nmck_applications t1
+                               JOIN nmck_app_ifo_amounts t2 ON t1.id = t2.app_id
                                WHERE t1.purchase_id=? AND t1.year=?""",
                             (p_id, year_val)
                         ).fetchall()
-
-                        n_sum = 0.0
-                        for n_src, n_amt in n_rows:
-                            if n_src and (target in str(n_src).strip().lower() or str(n_src).strip().lower() in target):
-                                if n_amt and float(n_amt) > 0:
-                                    n_sum += float(n_amt)
-
-                        if n_sum > 0:
-                            nmck_val += n_sum
-                        else:
-                            if len(p_ifos) <= 1:
+                        exact_nmck_rows = [
+                            (name, amount) for name, amount in n_rows
+                            if name is not None and str(name).strip() == exact_target
+                        ]
+                        if exact_nmck_rows:
+                            nmck_val += sum(parse_float(amount) for _, amount in exact_nmck_rows)
+                        elif p_nmck > 0 and not n_rows:
+                            if len(p_ifos) == 1:
                                 nmck_val += p_nmck
-                            elif p_nmck > 0:
-                                nmck_val += p_nmck / len(p_ifos)
+                            elif multi_ifo:
+                                report_warnings.add(
+                                    f"НМЦК: позиция ID {p_id} содержит несколько ИФО, "
+                                    f"но распределение суммы заявки по источникам за {year_val} год не заполнено."
+                                )
 
-                        # 3. СЫГРАНО (contracts & ds)
-                        contracts_list = conn.execute("SELECT id FROM contracts WHERE purchase_id=? AND year=?", (p_id, year_val)).fetchall()
-                        c_played_sum = 0.0
-                        has_c_detail = False
-
+                        # 3. Сыгранная сумма: распределения контракта/последнего ДС,
+                        # строго по точному названию источника.
+                        contracts_list = conn.execute(
+                            "SELECT id FROM contracts WHERE purchase_id=? AND year=?",
+                            (p_id, year_val)
+                        ).fetchall()
+                        contract_has_any_detail = False
+                        contract_missing_detail = False
+                        contract_exact_sum = 0.0
                         for (c_id,) in contracts_list:
-                            last_ds = conn.execute("SELECT id FROM ds_agreements WHERE contract_id=? ORDER BY id DESC LIMIT 1", (c_id,)).fetchone()
+                            last_ds = conn.execute(
+                                "SELECT id FROM ds_agreements WHERE contract_id=? ORDER BY id DESC LIMIT 1",
+                                (c_id,)
+                            ).fetchone()
                             if last_ds:
-                                ds_rows = conn.execute("SELECT ifo_source, amount FROM ds_ifo_amounts WHERE ds_id=?", (last_ds[0],)).fetchall()
-                                for ds_src, ds_amt in ds_rows:
-                                    if ds_src and (target in str(ds_src).strip().lower() or str(ds_src).strip().lower() in target):
-                                        if ds_amt and float(ds_amt) > 0:
-                                            c_played_sum += float(ds_amt)
-                                            has_c_detail = True
+                                detail_rows = conn.execute(
+                                    "SELECT ifo_source, amount FROM ds_ifo_amounts WHERE ds_id=?",
+                                    (last_ds[0],)
+                                ).fetchall()
                             else:
-                                c_rows = conn.execute("SELECT ifo_source, amount FROM contract_ifo_amounts WHERE contract_id=?", (c_id,)).fetchall()
-                                for c_src, c_amt in c_rows:
-                                    if c_src and (target in str(c_src).strip().lower() or str(c_src).strip().lower() in target):
-                                        if c_amt and float(c_amt) > 0:
-                                            c_played_sum += float(c_amt)
-                                            has_c_detail = True
+                                detail_rows = conn.execute(
+                                    "SELECT ifo_source, amount FROM contract_ifo_amounts WHERE contract_id=?",
+                                    (c_id,)
+                                ).fetchall()
 
-                        if has_c_detail and c_played_sum > 0:
-                            played_val += c_played_sum
-                        else:
-                            if len(p_ifos) <= 1:
+                            if detail_rows:
+                                contract_has_any_detail = True
+                            else:
+                                contract_missing_detail = True
+                            contract_exact_sum += sum(
+                                parse_float(amount)
+                                for name, amount in detail_rows
+                                if name is not None and str(name).strip() == exact_target
+                            )
+
+                        if contract_has_any_detail:
+                            played_val += contract_exact_sum
+                            if contract_missing_detail and multi_ifo:
+                                report_warnings.add(
+                                    f"Контракты/ДС: у части контрактов позиции ID {p_id} "
+                                    f"нет распределения по ИФО за {year_val} год."
+                                )
+                        elif p_played > 0:
+                            if len(p_ifos) == 1:
                                 played_val += p_played
-                            elif p_played > 0:
-                                played_val += p_played / len(p_ifos)
+                            elif multi_ifo:
+                                report_warnings.add(
+                                    f"Контракты/ДС: позиция ID {p_id} содержит несколько ИФО, "
+                                    f"но распределение сыгранной суммы по источникам за {year_val} год не заполнено."
+                                )
 
                     conn.close()
                     rem_val = plan_val - nmck_val - played_val
@@ -1256,6 +1287,14 @@ with st.expander("📊 Сформировать отчет", expanded=False):
                 tot_played = played_27 + played_28
                 tot_rem = rem_27 + rem_28
 
+                if report_warnings:
+                    st.warning(
+                        "Не все суммы можно достоверно отнести к выбранному ИФО. "
+                        "Для позиций с несколькими источниками отсутствует распределение; "
+                        "такие общие суммы не включены в отчет.\n\n- "
+                        + "\n- ".join(sorted(report_warnings))
+                    )
+
                 st.markdown(f"#### 📑 Сводные данные: {selected_rep_sub} | Источник: **{selected_rep_ifo}**")
 
                 ifo_rep_summary_data = [
@@ -1267,7 +1306,9 @@ with st.expander("📊 Сформировать отчет", expanded=False):
                 st.dataframe(ifo_rep_summary_df, use_container_width=True, hide_index=True)
 
                 # Позиции, где задействован этот ИФО
-                matching_ifo_df = sub_df[sub_df['ifo'].str.contains(selected_rep_ifo, case=False, na=False)].copy()
+                matching_ifo_df = sub_df[
+                    sub_df['ifo'].apply(lambda value: selected_rep_ifo in exact_ifo_tokens(value))
+                ].copy()
                 if not matching_ifo_df.empty:
                     st.markdown(f"##### Позиции подразделения, где заявлен источник '{selected_rep_ifo}':")
                     m_disp = matching_ifo_df[["id", "name", "year_placement", "okpd2", "kosgu", "basis"]].copy()
